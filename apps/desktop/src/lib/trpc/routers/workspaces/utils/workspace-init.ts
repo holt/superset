@@ -218,6 +218,15 @@ export async function initializeWorkspaceWorktree({
 			reason: string,
 			checkOriginRefs: boolean,
 		): Promise<LocalStartPointResult> => {
+			// Check local branch first before origin refs, since a local branch
+			// is more reliable than a remote-tracking ref that may be stale or unfetched
+			if (await refExistsLocally(mainRepoPath, effectiveStartPoint)) {
+				console.log(
+					`[workspace-init] ${reason}. Using local branch: ${effectiveStartPoint}`,
+				);
+				return { ref: effectiveStartPoint };
+			}
+
 			if (checkOriginRefs) {
 				const originRef = `origin/${effectiveStartPoint}`;
 				if (await refExistsLocally(mainRepoPath, originRef)) {
@@ -226,13 +235,6 @@ export async function initializeWorkspaceWorktree({
 					);
 					return { ref: originRef };
 				}
-			}
-
-			if (await refExistsLocally(mainRepoPath, effectiveStartPoint)) {
-				console.log(
-					`[workspace-init] ${reason}. Using local branch: ${effectiveStartPoint}`,
-				);
-				return { ref: effectiveStartPoint };
 			}
 
 			if (requestedStartPoint) {

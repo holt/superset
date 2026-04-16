@@ -548,6 +548,23 @@ export async function createWorktree(
 		const parentDir = join(worktreePath, "..");
 		await mkdir(parentDir, { recursive: true });
 
+		// Verify the start point resolves before attempting worktree creation.
+		// If an origin/ ref doesn't exist locally, fall back to the local branch name.
+		let resolvedStartPoint = startPoint;
+		if (startPoint.startsWith("origin/")) {
+			const exists = await refExistsLocally(mainRepoPath, startPoint);
+			if (!exists) {
+				const localRef = startPoint.replace(/^origin\//, "");
+				const localExists = await refExistsLocally(mainRepoPath, localRef);
+				if (localExists) {
+					console.log(
+						`[createWorktree] Remote ref "${startPoint}" not found locally, using local branch "${localRef}" instead`,
+					);
+					resolvedStartPoint = localRef;
+				}
+			}
+		}
+
 		await execWorktreeAdd({
 			mainRepoPath,
 			args: [
@@ -561,7 +578,7 @@ export async function createWorktree(
 				"-b",
 				branch,
 				worktreePath,
-				startPoint,
+				resolvedStartPoint,
 			],
 			worktreePath,
 		});
