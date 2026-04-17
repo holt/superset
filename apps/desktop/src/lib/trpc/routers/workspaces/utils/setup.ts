@@ -53,6 +53,26 @@ function readConfigFile(configPath: string): SetupConfig | null {
 			throw new Error("'run' field must be an array of strings");
 		}
 
+		if (parsed.env !== undefined) {
+			if (typeof parsed.env !== "object" || parsed.env === null || Array.isArray(parsed.env)) {
+				throw new Error("'env' field must be an object");
+			}
+			for (const [key, value] of Object.entries(parsed.env)) {
+				if (typeof value === "string") continue;
+				if (
+					typeof value === "object" &&
+					value !== null &&
+					"auto-port" in value &&
+					typeof (value as { "auto-port": unknown })["auto-port"] === "number"
+				) {
+					continue;
+				}
+				throw new Error(
+					`'env.${key}' must be a string or an object with "auto-port" (number)`,
+				);
+			}
+		}
+
 		return parsed;
 	} catch (error) {
 		console.error(
@@ -98,6 +118,26 @@ function readLocalConfigFile(filePath: string): LocalSetupConfig | null {
 			);
 		}
 
+		if (parsed.env !== undefined) {
+			if (typeof parsed.env !== "object" || parsed.env === null || Array.isArray(parsed.env)) {
+				throw new Error("'env' field must be an object");
+			}
+			for (const [key, value] of Object.entries(parsed.env)) {
+				if (typeof value === "string") continue;
+				if (
+					typeof value === "object" &&
+					value !== null &&
+					"auto-port" in value &&
+					typeof (value as { "auto-port": unknown })["auto-port"] === "number"
+				) {
+					continue;
+				}
+				throw new Error(
+					`'env.${key}' must be a string or an object with "auto-port" (number)`,
+				);
+			}
+		}
+
 		return parsed;
 	} catch (error) {
 		console.error(
@@ -124,6 +164,9 @@ function mergeBaseConfigs(
 		setup: override.setup ?? base.setup,
 		teardown: override.teardown ?? base.teardown,
 		run: override.run ?? base.run,
+		env: override.env
+			? { ...base.env, ...override.env }
+			: base.env,
 	};
 }
 
@@ -152,6 +195,10 @@ export function mergeConfigs(
 			const after = localValue.after ?? [];
 			result[key] = [...before, ...(base[key] ?? []), ...after];
 		}
+	}
+
+	if (local.env !== undefined) {
+		result.env = { ...base.env, ...local.env };
 	}
 
 	return result;

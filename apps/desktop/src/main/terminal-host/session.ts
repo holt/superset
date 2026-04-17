@@ -109,6 +109,8 @@ export interface SessionOptions {
 	rows: number;
 	cwd: string;
 	env?: Record<string, string>;
+	/** Extra env vars from .superset/config.json — merged after safe-env filtering */
+	configEnv?: Record<string, string>;
 	shell?: string;
 	workspaceName?: string;
 	workspacePath?: string;
@@ -246,18 +248,26 @@ export class Session {
 		cols: number;
 		rows: number;
 		env?: Record<string, string>;
+		/** Extra env vars from .superset/config.json — merged after safe-env filtering */
+		configEnv?: Record<string, string>;
 	}): void {
 		if (this.subprocess) {
 			throw new Error("PTY already spawned");
 		}
 
-		const { cwd, cols, rows, env } = options;
+		const { cwd, cols, rows, env, configEnv } = options;
 
 		// In normal flow, caller provides a prebuilt terminal env.
 		// Fall back to process.env only if env was omitted.
 		const envSource = env ?? (process.env as Record<string, string>);
 		const processEnv = buildSafeEnv(envSource);
 		processEnv.TERM = "xterm-256color";
+
+		// Merge config env vars after safe-env filtering — these are
+		// intentionally user-configured in .superset/config.json
+		if (configEnv) {
+			Object.assign(processEnv, configEnv);
+		}
 
 		const shellArgs = this.command
 			? getCommandShellArgs(this.shell, this.command)
@@ -1172,6 +1182,7 @@ export function createSession(request: CreateOrAttachRequest): Session {
 		rows: request.rows,
 		cwd: request.cwd || process.env.HOME || "/",
 		env: request.env,
+		configEnv: request.configEnv,
 		shell: request.shell,
 		workspaceName: request.workspaceName,
 		workspacePath: request.workspacePath,

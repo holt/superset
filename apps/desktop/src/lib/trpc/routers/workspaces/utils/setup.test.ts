@@ -683,3 +683,142 @@ describe("run config", () => {
 		expect(config?.run).toEqual(["export DEBUG=1", "npm run dev"]);
 	});
 });
+
+describe("env config", () => {
+	beforeEach(() => {
+		mkdirSync(join(MAIN_REPO, ".superset"), { recursive: true });
+	});
+
+	afterEach(() => {
+		if (existsSync(TEST_DIR)) {
+			rmSync(TEST_DIR, { recursive: true, force: true });
+		}
+		if (existsSync(USER_CONFIG_DIR)) {
+			rmSync(USER_CONFIG_DIR, { recursive: true, force: true });
+		}
+	});
+
+	test("loads static env values from config", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({
+				setup: ["yarn install"],
+				env: { NODE_ENV: "development", API_KEY: "test-key" },
+			}),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config?.env).toEqual({
+			NODE_ENV: "development",
+			API_KEY: "test-key",
+		});
+	});
+
+	test("loads auto-port env values from config", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({
+				env: { PORT: { "auto-port": 3000 } },
+			}),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config?.env).toEqual({ PORT: { "auto-port": 3000 } });
+	});
+
+	test("loads mixed static and auto-port env values", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({
+				env: {
+					PORT: { "auto-port": 3000 },
+					NODE_ENV: "development",
+				},
+			}),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config?.env).toEqual({
+			PORT: { "auto-port": 3000 },
+			NODE_ENV: "development",
+		});
+	});
+
+	test("rejects invalid env field (not an object)", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({ env: "not-an-object" }),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config).toBeNull();
+	});
+
+	test("rejects invalid env value (number)", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({ env: { PORT: 3000 } }),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config).toBeNull();
+	});
+
+	test("config without env returns undefined env", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({ setup: ["yarn install"] }),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config?.env).toBeUndefined();
+	});
+
+	test("worktree env merges with main repo env", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({
+				env: { NODE_ENV: "development", SHARED: "from-main" },
+			}),
+		);
+
+		mkdirSync(join(WORKTREE, ".superset"), { recursive: true });
+		writeFileSync(
+			join(WORKTREE, ".superset", "config.json"),
+			JSON.stringify({
+				env: { PORT: { "auto-port": 3000 }, SHARED: "from-worktree" },
+			}),
+		);
+
+		const config = loadSetupConfig({
+			mainRepoPath: MAIN_REPO,
+			worktreePath: WORKTREE,
+		});
+		expect(config?.env).toEqual({
+			NODE_ENV: "development",
+			SHARED: "from-worktree",
+			PORT: { "auto-port": 3000 },
+		});
+	});
+
+	test("local config env overrides base env", () => {
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.json"),
+			JSON.stringify({
+				env: { PORT: { "auto-port": 3000 }, NODE_ENV: "development" },
+			}),
+		);
+		writeFileSync(
+			join(MAIN_REPO, ".superset", "config.local.json"),
+			JSON.stringify({
+				env: { PORT: "8080" },
+			}),
+		);
+
+		const config = loadSetupConfig({ mainRepoPath: MAIN_REPO });
+		expect(config?.env).toEqual({
+			PORT: "8080",
+			NODE_ENV: "development",
+		});
+	});
+});

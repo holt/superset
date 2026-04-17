@@ -1,7 +1,14 @@
+export interface AutoPortEnvValue {
+	"auto-port": number;
+}
+
+export type EnvValue = string | AutoPortEnvValue;
+
 export interface SetupConfig {
 	setup?: string[];
 	teardown?: string[];
 	run?: string[];
+	env?: Record<string, EnvValue>;
 }
 
 export interface LocalScriptMerge {
@@ -13,6 +20,7 @@ export interface LocalSetupConfig {
 	setup?: string[] | LocalScriptMerge;
 	teardown?: string[] | LocalScriptMerge;
 	run?: string[] | LocalScriptMerge;
+	env?: Record<string, EnvValue>;
 }
 
 export interface SetupAction {

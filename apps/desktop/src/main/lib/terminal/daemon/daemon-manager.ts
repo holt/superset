@@ -11,6 +11,7 @@ import {
 } from "../../terminal-host/client";
 import type { ListSessionsResponse } from "../../terminal-host/types";
 import { raceWithAbort, throwIfAborted } from "../abort";
+import { resolveConfigEnv } from "../config-env";
 import { buildTerminalEnv, getDefaultShell } from "../env";
 import { TerminalKilledError } from "../errors";
 import { portManager } from "../port-manager";
@@ -439,6 +440,19 @@ export class DaemonTerminalManager extends EventEmitter {
 				themeType,
 			});
 
+			// Resolve env vars from .superset/config.json (auto-port allocation etc.)
+			let configEnv: Record<string, string> | undefined;
+			if (rootPath && workspacePath) {
+				try {
+					configEnv = await resolveConfigEnv({
+						mainRepoPath: rootPath,
+						worktreePath: workspacePath,
+					});
+				} catch (err) {
+					console.error(`[config-env] error:`, err);
+				}
+			}
+
 			if (DEBUG_TERMINAL) {
 				console.log("[DaemonTerminalManager] Calling daemon createOrAttach:", {
 					paneId,
@@ -479,6 +493,7 @@ export class DaemonTerminalManager extends EventEmitter {
 					rows,
 					cwd,
 					env,
+					configEnv,
 					shell,
 					command,
 				},

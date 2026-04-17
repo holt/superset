@@ -15,8 +15,8 @@ export const terminalRouter = router({
 				initialCommand: z.string().optional(),
 			}),
 		)
-		.mutation(({ ctx, input }) => {
-			const result = createTerminalSessionInternal({
+		.mutation(async ({ ctx, input }) => {
+			const result = await createTerminalSessionInternal({
 				terminalId: input.terminalId,
 				workspaceId: input.workspaceId,
 				themeType: parseThemeType(input.themeType),

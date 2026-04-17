@@ -11,6 +11,7 @@ import type { Hono } from "hono";
 import { type IPty, spawn } from "node-pty";
 import type { HostDb } from "../db";
 import { projects, terminalSessions, workspaces } from "../db/schema";
+import { resolveConfigEnv } from "./config-env";
 import {
 	buildV2TerminalEnv,
 	getShellLaunchArgs,
@@ -215,13 +216,13 @@ interface CreateTerminalSessionOptions {
 	initialCommand?: string;
 }
 
-export function createTerminalSessionInternal({
+export async function createTerminalSessionInternal({
 	terminalId,
 	workspaceId,
 	themeType,
 	db,
 	initialCommand,
-}: CreateTerminalSessionOptions): TerminalSession | { error: string } {
+}: CreateTerminalSessionOptions): Promise<TerminalSession | { error: string }> {
 	const existing = sessions.get(terminalId);
 	if (existing) {
 		return existing;
@@ -246,6 +247,12 @@ export function createTerminalSessionInternal({
 
 	const cwd = workspace.worktreePath;
 
+	// Resolve env vars from .superset/config.json (auto-port allocation etc.)
+	const configEnv = await resolveConfigEnv({
+		mainRepoPath: rootPath,
+		worktreePath: workspace.worktreePath,
+	});
+
 	// Use the preserved shell snapshot — never live process.env
 	const baseEnv = getTerminalBaseEnv();
 	const supersetHomeDir = process.env.SUPERSET_HOME_DIR || "";
@@ -266,6 +273,7 @@ export function createTerminalSessionInternal({
 			process.env.NODE_ENV === "development" ? "development" : "production",
 		agentHookPort: process.env.SUPERSET_AGENT_HOOK_PORT || "",
 		agentHookVersion: process.env.SUPERSET_AGENT_HOOK_VERSION || "",
+		configEnv,
 	});
 
 	let pty: IPty;
@@ -400,7 +408,7 @@ export function registerWorkspaceTerminalRoute({
 			return c.json({ error: "Missing terminalId or workspaceId" }, 400);
 		}
 
-		const result = createTerminalSessionInternal({
+		const result = await createTerminalSessionInternal({
 			terminalId: body.terminalId,
 			workspaceId: body.workspaceId,
 			themeType: parseThemeType(body.themeType),
@@ -447,7 +455,7 @@ export function registerWorkspaceTerminalRoute({
 			const terminalId = c.req.param("terminalId") ?? "";
 
 			return {
-				onOpen: (_event, ws) => {
+				onOpen: async (_event, ws) => {
 					if (!terminalId) {
 						ws.close(1011, "Missing terminalId");
 						return;
@@ -469,7 +477,7 @@ export function registerWorkspaceTerminalRoute({
 						}
 
 						const themeType = parseThemeType(c.req.query("themeType"));
-						const result = createTerminalSessionInternal({
+						const result = await createTerminalSessionInternal({
 							terminalId,
 							workspaceId,
 							themeType,

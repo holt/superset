@@ -161,6 +161,8 @@ export interface CreateOrAttachRequest {
 	rows: number;
 	cwd?: string;
 	env?: Record<string, string>;
+	/** Extra env vars from .superset/config.json — merged after safe-env filtering */
+	configEnv?: Record<string, string>;
 	shell?: string;
 	workspaceId: string;
 	paneId: string;

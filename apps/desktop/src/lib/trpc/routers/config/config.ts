@@ -37,7 +37,8 @@ function hasConfiguredScripts(
 const CONFIG_TEMPLATE = `{
   "setup": [],
   "teardown": [],
-  "run": []
+  "run": [],
+  "env": {}
 }
 `;
 
@@ -457,6 +458,14 @@ export const createConfigRouter = () => {
 					setup: z.array(z.string()),
 					teardown: z.array(z.string()),
 					run: z.array(z.string()).optional(),
+					env: z
+						.record(
+							z.union([
+								z.string(),
+								z.object({ "auto-port": z.number().int().min(1).max(65535) }),
+							]),
+						)
+						.optional(),
 				}),
 			)
 			.mutation(({ input }) => {
@@ -490,6 +499,7 @@ export const createConfigRouter = () => {
 					setup: input.setup,
 					teardown: input.teardown,
 					...(input.run !== undefined && { run: input.run }),
+					...(input.env !== undefined && { env: input.env }),
 				};
 
 				try {

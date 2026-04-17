@@ -135,6 +135,7 @@ export class TerminalHost {
 						cols: request.cols,
 						rows: request.rows,
 						env: request.env,
+						configEnv: request.configEnv,
 					});
 
 					try {

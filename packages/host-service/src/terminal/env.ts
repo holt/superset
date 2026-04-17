@@ -112,6 +112,8 @@ interface BuildV2TerminalEnvParams {
 	supersetEnv: "development" | "production";
 	agentHookPort: string;
 	agentHookVersion: string;
+	/** Extra env vars from .superset/config.json env field (already resolved) */
+	configEnv?: Record<string, string>;
 }
 
 /**
@@ -165,6 +167,10 @@ export function buildV2TerminalEnv(
 
 	if (supersetHomeDir) {
 		env.SUPERSET_HOME_DIR = supersetHomeDir;
+	}
+
+	if (params.configEnv) {
+		Object.assign(env, params.configEnv);
 	}
 
 	// Electron child processes can't access macOS Keychain for TLS cert verification,
