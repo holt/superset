@@ -133,7 +133,7 @@ export const GHPRResponseSchema = z.object({
 	mergedAt: z.string().nullable(),
 	additions: z.number(),
 	deletions: z.number(),
-	headRefOid: z.string(),
+	headRefOid: z.string().optional(),
 	headRefName: z.string(),
 	headRepository: z
 		.object({
@@ -157,10 +157,34 @@ export const GHPRResponseSchema = z.object({
 	reviewRequests: z.array(GHReviewRequestSchema).nullable().optional(),
 });
 
+const GHRepoParentSchema = z
+	.object({
+		url: z.string().optional(),
+		name: z.string().optional(),
+		owner: z
+			.object({
+				login: z.string(),
+			})
+			.optional(),
+	})
+	.nullable()
+	.optional()
+	.transform((parent) => {
+		if (!parent) return parent;
+		// Newer gh CLI versions omit parent.url — reconstruct it from owner/name
+		if (!parent.url && parent.owner?.login && parent.name) {
+			return { url: `https://github.com/${parent.owner.login}/${parent.name}` };
+		}
+		if (parent.url) {
+			return { url: parent.url };
+		}
+		return null;
+	});
+
 export const GHRepoResponseSchema = z.object({
 	url: z.string(),
 	isFork: z.boolean().optional().default(false),
-	parent: z.object({ url: z.string() }).nullable().optional(),
+	parent: GHRepoParentSchema,
 });
 
 export interface RepoContext {
