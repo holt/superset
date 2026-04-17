@@ -148,19 +148,37 @@ export function parsePaginatedApiArray(stdout: string): unknown[] {
 		return [];
 	}
 
+	// With --slurp: output is [[...], [...]] (array of arrays)
+	// Without --slurp: output is [...][...] (concatenated JSON arrays)
 	try {
 		const raw = JSON.parse(trimmed);
 		if (!Array.isArray(raw)) {
 			return [];
 		}
-
 		return raw.flatMap((page) => (Array.isArray(page) ? page : [page]));
-	} catch (error) {
-		console.warn(
-			"[GitHub] Failed to parse paginated API array response:",
-			error instanceof Error ? error.message : String(error),
-		);
-		return [];
+	} catch {
+		// Likely concatenated JSON arrays from --paginate without --slurp
+		// Split on "][" and parse each chunk
+		try {
+			const chunks = trimmed
+				.split(/\]\s*\[/)
+				.map((chunk, i, arr) => {
+					if (arr.length === 1) return chunk;
+					if (i === 0) return `${chunk}]`;
+					if (i === arr.length - 1) return `[${chunk}`;
+					return `[${chunk}]`;
+				});
+			return chunks.flatMap((chunk) => {
+				const parsed = JSON.parse(chunk);
+				return Array.isArray(parsed) ? parsed : [parsed];
+			});
+		} catch (error) {
+			console.warn(
+				"[GitHub] Failed to parse paginated API array response:",
+				error instanceof Error ? error.message : String(error),
+			);
+			return [];
+		}
 	}
 }
 
@@ -317,7 +335,7 @@ async function fetchPaginatedCommentsEndpoint(
 ): Promise<unknown[]> {
 	const { stdout } = await execWithShellEnv(
 		"gh",
-		["api", "--paginate", "--slurp", endpoint],
+		["api", "--paginate", endpoint],
 		{ cwd: worktreePath },
 	);
 
