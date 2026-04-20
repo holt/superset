@@ -460,6 +460,7 @@ export const createConfigRouter = () => {
 					run: z.array(z.string()).optional(),
 					env: z
 						.record(
+							z.string(),
 							z.union([
 								z.string(),
 								z.object({ "auto-port": z.number().int().min(1).max(65535) }),
