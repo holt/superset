@@ -24,6 +24,7 @@ import { electronTrpc } from "renderer/lib/electron-trpc";
 import { showWorkspaceAutoNameWarningToast } from "renderer/lib/workspaces/showWorkspaceAutoNameWarningToast";
 import { InitGitDialog } from "renderer/react-query/projects/InitGitDialog";
 import { DashboardNewWorkspaceModal } from "renderer/routes/_authenticated/components/DashboardNewWorkspaceModal";
+import { V1MigrationSummaryModal } from "renderer/routes/_authenticated/components/V1MigrationSummaryModal";
 import { WorkspaceInitEffects } from "renderer/screens/main/components/WorkspaceInitEffects";
 import { useSettingsStore } from "renderer/stores/settings-state";
 import { useTabsStore } from "renderer/stores/tabs/store";
@@ -35,6 +36,7 @@ import { AgentHooks } from "./components/AgentHooks";
 import { GlobalBrowserLifecycle } from "./components/GlobalBrowserLifecycle";
 import { GlobalTerminalLifecycle } from "./components/GlobalTerminalLifecycle";
 import { TeardownLogsDialog } from "./components/TeardownLogsDialog";
+import { V2NotificationController } from "./components/V2NotificationController";
 import { createPierreWorker } from "./lib/pierreWorker";
 import { CollectionsProvider } from "./providers/CollectionsProvider";
 import { DeletingWorkspacesProvider } from "./providers/DeletingWorkspacesProvider";
@@ -78,6 +80,29 @@ function AuthenticatedLayout() {
 	// Update workspace-run pane state on terminal exit
 	electronTrpc.notifications.subscribe.useSubscription(undefined, {
 		onData: (event) => {
+			if (
+				event.type === NOTIFICATION_EVENTS.FOCUS_V2_NOTIFICATION_SOURCE &&
+				event.data
+			) {
+				localStorage.setItem("lastViewedWorkspaceId", event.data.workspaceId);
+				const source = event.data.source;
+				void navigate({
+					to: "/v2-workspace/$workspaceId",
+					params: { workspaceId: event.data.workspaceId },
+					search:
+						source.type === "terminal"
+							? {
+									terminalId: source.id,
+									focusRequestId: crypto.randomUUID(),
+								}
+							: {
+									chatSessionId: source.id,
+									focusRequestId: crypto.randomUUID(),
+								},
+				});
+				return;
+			}
+
 			if (
 				event.type !== NOTIFICATION_EVENTS.TERMINAL_EXIT ||
 				!event.data?.paneId
@@ -183,16 +208,18 @@ function AuthenticatedLayout() {
 	return (
 		<DndProvider manager={dragDropManager}>
 			<CollectionsProvider>
-				<GlobalTerminalLifecycle />
 				<GlobalBrowserLifecycle />
 				<LocalHostServiceProvider>
+					<GlobalTerminalLifecycle />
 					<DeletingWorkspacesProvider>
 						<WorkerPoolContextProvider
 							poolOptions={{ workerFactory: createPierreWorker, poolSize: 8 }}
 							highlighterOptions={{ preferredHighlighter: "shiki-wasm" }}
 						>
 							<AgentHooks />
+							<V2NotificationController />
 							<Outlet />
+							<V1MigrationSummaryModal />
 							<WorkspaceInitEffects />
 							{isV2CloudEnabled ? (
 								<DashboardNewWorkspaceModal />

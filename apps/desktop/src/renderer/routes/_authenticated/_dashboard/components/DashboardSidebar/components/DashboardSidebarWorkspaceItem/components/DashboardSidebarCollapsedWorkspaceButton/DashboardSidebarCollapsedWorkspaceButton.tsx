@@ -1,12 +1,16 @@
 import { cn } from "@superset/ui/utils";
 import { type ComponentPropsWithoutRef, forwardRef } from "react";
 import type { ActivePaneStatus } from "shared/tabs-types";
-import type { DashboardSidebarWorkspaceHostType } from "../../../../types";
+import type {
+	DashboardSidebarWorkspaceHostType,
+	DashboardSidebarWorkspaceType,
+} from "../../../../types";
 import { DashboardSidebarWorkspaceIcon } from "../DashboardSidebarWorkspaceIcon";
 
 interface DashboardSidebarCollapsedWorkspaceButtonProps
 	extends ComponentPropsWithoutRef<"button"> {
 	hostType: DashboardSidebarWorkspaceHostType;
+	workspaceType: DashboardSidebarWorkspaceType;
 	hostIsOnline: boolean | null;
 	isActive: boolean;
 	workspaceStatus?: ActivePaneStatus | null;
@@ -20,6 +24,7 @@ export const DashboardSidebarCollapsedWorkspaceButton = forwardRef<
 	(
 		{
 			hostType,
+			workspaceType,
 			hostIsOnline,
 			isActive,
 			workspaceStatus = null,
@@ -35,14 +40,15 @@ export const DashboardSidebarCollapsedWorkspaceButton = forwardRef<
 				ref={ref}
 				className={cn(
 					"relative flex items-center justify-center size-8 rounded-md",
-					"hover:bg-muted/50 transition-colors cursor-pointer",
-					isActive && "bg-muted",
+					"transition-colors cursor-pointer",
+					isActive ? "bg-muted hover:bg-muted" : "hover:bg-muted/50",
 					className,
 				)}
 				{...props}
 			>
 				<DashboardSidebarWorkspaceIcon
 					hostType={hostType}
+					workspaceType={workspaceType}
 					hostIsOnline={hostIsOnline}
 					isActive={isActive}
 					variant="collapsed"

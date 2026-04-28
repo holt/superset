@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { projects, workspaces } from "../../../db/schema";
+import { invalidateLabelCache } from "../../../ports/static-ports";
 import { runTeardown, type TeardownResult } from "../../../runtime/teardown";
 import { disposeSessionsByWorkspaceId } from "../../../terminal/terminal";
 import type { TeardownFailureCause } from "../../error-types";
@@ -54,6 +55,27 @@ export const workspaceCleanupRouter = router({
 						.findFirst({ where: eq(projects.id, local.projectId) })
 						.sync()
 				: undefined;
+
+			if (local && project && local.worktreePath === project.repoPath) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						"Main workspaces cannot be deleted. Remove them from the sidebar or remove the project from this host instead.",
+				});
+			}
+			if (ctx.api) {
+				const cloudWorkspace = await ctx.api.v2Workspace.getFromHost.query({
+					organizationId: ctx.organizationId,
+					id: input.workspaceId,
+				});
+				if (cloudWorkspace?.type === "main") {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message:
+							"Main workspaces cannot be deleted. Remove them from the sidebar or remove the project from this host instead.",
+					});
+				}
+			}
 
 			// ─── Step 0: Preflight ─────────────────────────────────────────
 			// Block only on dirty worktree (the common "I forgot to commit"
@@ -166,6 +188,7 @@ export const workspaceCleanupRouter = router({
 					.delete(workspaces)
 					.where(eq(workspaces.id, input.workspaceId))
 					.run();
+				invalidateLabelCache(input.workspaceId);
 			}
 
 			return {

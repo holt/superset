@@ -14,7 +14,20 @@ const agentConfigSchema = z
 	})
 	.passthrough() as unknown as z.ZodType<ResolvedAgentConfig>;
 
-const iana = z.string().min(1).describe("IANA timezone name");
+function isValidIanaTimezone(timezone: string): boolean {
+	try {
+		new Intl.DateTimeFormat(undefined, { timeZone: timezone });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+const iana = z
+	.string()
+	.min(1)
+	.refine(isValidIanaTimezone, "Invalid IANA timezone name")
+	.describe("IANA timezone name");
 const rruleBody = z
 	.string()
 	.min(1)
@@ -25,7 +38,7 @@ export const createAutomationSchema = z.object({
 	name: z.string().min(1).max(200),
 	prompt: z.string().min(1).max(20_000),
 	agentConfig: agentConfigSchema,
-	targetHostId: z.string().uuid().nullish(),
+	targetHostId: z.string().min(1).nullish(),
 	v2ProjectId: z.string().uuid(),
 	v2WorkspaceId: z.string().uuid().nullish(),
 	rrule: rruleBody,
@@ -39,7 +52,7 @@ export const updateAutomationSchema = z.object({
 	name: z.string().min(1).max(200).optional(),
 	prompt: z.string().min(1).max(20_000).optional(),
 	agentConfig: agentConfigSchema.optional(),
-	targetHostId: z.string().uuid().nullish(),
+	targetHostId: z.string().min(1).nullish(),
 	v2ProjectId: z.string().uuid().optional(),
 	v2WorkspaceId: z.string().uuid().nullish(),
 	rrule: rruleBody.optional(),

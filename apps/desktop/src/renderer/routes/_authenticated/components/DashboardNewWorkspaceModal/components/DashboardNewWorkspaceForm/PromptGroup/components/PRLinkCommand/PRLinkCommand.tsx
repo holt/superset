@@ -1,3 +1,4 @@
+import { Checkbox } from "@superset/ui/checkbox";
 import {
 	Command,
 	CommandEmpty,
@@ -10,11 +11,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@superset/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useState } from "react";
-import { env } from "renderer/env.renderer";
+import { useId, useState } from "react";
+import { useHostTargetUrl } from "renderer/hooks/host-service/useHostTargetUrl";
 import { useDebouncedValue } from "renderer/hooks/useDebouncedValue";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
-import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import {
 	PRIcon,
 	type PRState,
@@ -51,17 +51,14 @@ export function PRLinkCommand({
 }: PRLinkCommandProps) {
 	const [open, setOpen] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
+	const [showClosed, setShowClosed] = useState(false);
+	const showClosedId = useId();
 	const debouncedQuery = useDebouncedValue(searchQuery, 300);
-	const { activeHostUrl } = useLocalHostService();
+	const hostUrl = useHostTargetUrl(hostTarget);
 
 	const trimmedQuery = searchQuery.trim();
 	const debouncedTrimmed = debouncedQuery.trim();
 	const isPendingDebounce = trimmedQuery !== debouncedTrimmed;
-
-	const hostUrl =
-		hostTarget.kind === "local"
-			? activeHostUrl
-			: `${env.RELAY_URL}/hosts/${hostTarget.hostId}`;
 
 	const { data, isFetching } = useQuery({
 		queryKey: [
@@ -70,6 +67,7 @@ export function PRLinkCommand({
 			projectId,
 			hostUrl,
 			debouncedTrimmed,
+			showClosed,
 		],
 		queryFn: async () => {
 			if (!hostUrl || !projectId) return { pullRequests: [] };
@@ -78,6 +76,7 @@ export function PRLinkCommand({
 				projectId,
 				query: debouncedTrimmed || undefined,
 				limit: 30,
+				includeClosed: showClosed,
 			});
 		},
 		enabled: !!projectId && !!hostUrl && open,
@@ -129,6 +128,19 @@ export function PRLinkCommand({
 						value={searchQuery}
 						onValueChange={setSearchQuery}
 					/>
+					<div className="flex items-center gap-2 border-b px-3 py-2">
+						<Checkbox
+							id={showClosedId}
+							checked={showClosed}
+							onCheckedChange={(checked) => setShowClosed(checked === true)}
+						/>
+						<label
+							htmlFor={showClosedId}
+							className="cursor-pointer select-none text-xs text-muted-foreground"
+						>
+							Show closed
+						</label>
+					</div>
 					<CommandList className="max-h-[280px]">
 						{pullRequests.length === 0 && (
 							<CommandEmpty>
@@ -139,8 +151,12 @@ export function PRLinkCommand({
 									: repoMismatch
 										? `PR URL must match ${repoMismatch}.`
 										: debouncedTrimmed
-											? "No pull requests found."
-											: "No pull requests found."}
+											? showClosed
+												? "No pull requests found."
+												: "No open pull requests found."
+											: showClosed
+												? "No pull requests found."
+												: "No open pull requests."}
 							</CommandEmpty>
 						)}
 						{pullRequests.length > 0 && (
@@ -148,7 +164,9 @@ export function PRLinkCommand({
 								heading={
 									debouncedTrimmed
 										? `${pullRequests.length} result${pullRequests.length === 1 ? "" : "s"}`
-										: "Recent PRs"
+										: showClosed
+											? "Recent PRs"
+											: "Open PRs"
 								}
 							>
 								{pullRequests.map((pr) => (

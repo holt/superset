@@ -7,11 +7,12 @@ import {
 	useMemo,
 	useRef,
 } from "react";
-import { HiMiniXMark } from "react-icons/hi2";
+import { HiMiniMinus, HiMiniXMark } from "react-icons/hi2";
 import type { DiffStats } from "renderer/hooks/host-service/useDiffStats";
 import { HotkeyLabel } from "renderer/hotkeys";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { RenameInput } from "renderer/screens/main/components/WorkspaceSidebar/RenameInput";
+import type { ActivePaneStatus } from "shared/tabs-types";
 import type {
 	DashboardSidebarWorkspace,
 	DashboardSidebarWorkspacePullRequest,
@@ -38,9 +39,11 @@ interface DashboardSidebarExpandedWorkspaceRowProps
 	renameValue: string;
 	shortcutLabel?: string;
 	diffStats: DiffStats | null;
+	workspaceStatus?: ActivePaneStatus | null;
 	onClick?: () => void;
 	onDoubleClick?: () => void;
-	onDeleteClick: () => void;
+	onCloseWorkspaceClick: () => void;
+	onRemoveFromSidebarClick: () => void;
 	onRenameValueChange: (value: string) => void;
 	onSubmitRename: () => void;
 	onCancelRename: () => void;
@@ -58,9 +61,11 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 			renameValue,
 			shortcutLabel,
 			diffStats,
+			workspaceStatus = null,
 			onClick,
 			onDoubleClick,
-			onDeleteClick,
+			onCloseWorkspaceClick,
+			onRemoveFromSidebarClick,
 			onRenameValueChange,
 			onSubmitRename,
 			onCancelRename,
@@ -95,6 +100,13 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 			() => getCreationStatusText(creationStatus),
 			[creationStatus],
 		);
+		const isMainWorkspace = workspace.type === "main";
+		const workspaceKindTitle = isMainWorkspace
+			? "Main workspace"
+			: "Worktree workspace";
+		const workspaceKindDescription = isMainWorkspace
+			? "Uses the repository checkout on this host"
+			: "Isolated copy for parallel development";
 
 		return (
 			// biome-ignore lint/a11y/noStaticElementInteractions: Mirrors the legacy sidebar row UI, which includes nested action buttons.
@@ -117,9 +129,12 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 				onDoubleClick={onDoubleClick}
 				className={cn(
 					"relative flex w-full items-center pl-3 pr-2 text-left text-sm",
-					onClick && "cursor-pointer hover:bg-muted/50",
+					onClick &&
+						(isActive
+							? "cursor-pointer hover:bg-muted"
+							: "cursor-pointer hover:bg-muted/50"),
 					"group",
-					"py-1.5",
+					"py-2",
 					isActive && "bg-muted",
 					className,
 				)}
@@ -151,10 +166,11 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 							>
 								<DashboardSidebarWorkspaceIcon
 									hostType={hostType}
+									workspaceType={workspace.type}
 									hostIsOnline={hostIsOnline}
 									isActive={isActive}
 									variant="expanded"
-									workspaceStatus={null}
+									workspaceStatus={workspaceStatus}
 									creationStatus={creationStatus}
 									pullRequestState={pullRequest.state}
 								/>
@@ -163,10 +179,11 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 							<div className="relative mr-2.5 flex size-5 shrink-0 items-center justify-center">
 								<DashboardSidebarWorkspaceIcon
 									hostType={hostType}
+									workspaceType={workspace.type}
 									hostIsOnline={hostIsOnline}
 									isActive={isActive}
 									variant="expanded"
-									workspaceStatus={null}
+									workspaceStatus={workspaceStatus}
 									creationStatus={creationStatus}
 									pullRequestState={null}
 								/>
@@ -186,86 +203,127 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 						) : (
 							<>
 								<p className="text-xs font-medium">
-									{hostType === "local-device"
-										? "Local workspace"
-										: hostType === "remote-device"
-											? hostIsOnline === false
-												? "Remote workspace — device offline"
-												: "Remote workspace"
-											: "Cloud workspace"}
+									{isMainWorkspace
+										? workspaceKindTitle
+										: hostType === "local-device"
+											? "Local workspace"
+											: hostType === "remote-device"
+												? hostIsOnline === false
+													? "Remote workspace — device offline"
+													: "Remote workspace"
+												: "Cloud workspace"}
 								</p>
 								<p className="text-xs text-muted-foreground">
-									{hostType === "local-device"
-										? "Running on this device"
-										: hostType === "remote-device"
-											? hostIsOnline === false
-												? "The associated device isn't reachable right now"
-												: "Running on a paired device"
-											: "Hosted in the cloud"}
+									{isMainWorkspace
+										? workspaceKindDescription
+										: hostType === "local-device"
+											? "Running on this device"
+											: hostType === "remote-device"
+												? hostIsOnline === false
+													? "The associated device isn't reachable right now"
+													: "Running on a paired device"
+												: "Hosted in the cloud"}
 								</p>
 							</>
 						)}
 					</TooltipContent>
 				</Tooltip>
 
-				<div className="flex min-w-0 flex-1 flex-col justify-center">
-					<div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] grid-rows-2 items-center gap-x-1.5 gap-y-0.5">
-						{isRenaming ? (
-							<RenameInput
-								value={renameValue}
-								onChange={onRenameValueChange}
-								onSubmit={onSubmitRename}
-								onCancel={onCancelRename}
-								className={cn(
-									"h-5 w-full -ml-1 border-none bg-transparent px-1 py-0 text-[13px] leading-tight outline-none",
-								)}
-							/>
-						) : (
+				<div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5">
+					{isRenaming ? (
+						<RenameInput
+							value={renameValue}
+							onChange={onRenameValueChange}
+							onSubmit={onSubmitRename}
+							onCancel={onCancelRename}
+							className={cn(
+								"h-5 w-full -ml-1 border-none bg-transparent px-1 py-0 text-[13px] leading-tight outline-none",
+							)}
+						/>
+					) : (
+						<span
+							className={cn(
+								"truncate text-[13px] leading-tight transition-colors",
+								isActive ? "text-foreground" : "text-foreground/80",
+							)}
+						>
+							{name || branch}
+						</span>
+					)}
+
+					<div className="col-start-2 row-start-1 grid h-5 shrink-0 items-center [&>*]:col-start-1 [&>*]:row-start-1">
+						{creationStatusText ? (
 							<span
 								className={cn(
-									"truncate text-[13px] leading-tight transition-colors",
-									isActive ? "text-foreground" : "text-foreground/80",
+									"text-[11px]",
+									creationStatus === "failed"
+										? "text-destructive"
+										: "text-muted-foreground",
 								)}
 							>
-								{name || branch}
+								{creationStatusText}
 							</span>
-						)}
-
-						<div className="col-start-2 row-start-1 grid h-5 shrink-0 items-center [&>*]:col-start-1 [&>*]:row-start-1">
-							{creationStatusText ? (
-								<span
-									className={cn(
-										"text-[11px]",
-										creationStatus === "failed"
-											? "text-destructive"
-											: "text-muted-foreground",
+						) : (
+							<>
+								{diffStats &&
+									(diffStats.additions > 0 || diffStats.deletions > 0) && (
+										<DashboardSidebarWorkspaceDiffStats
+											additions={diffStats.additions}
+											deletions={diffStats.deletions}
+											isActive={isActive}
+										/>
 									)}
-								>
-									{creationStatusText}
-								</span>
-							) : (
-								<>
-									{diffStats &&
-										(diffStats.additions > 0 || diffStats.deletions > 0) && (
-											<DashboardSidebarWorkspaceDiffStats
-												additions={diffStats.additions}
-												deletions={diffStats.deletions}
-												isActive={isActive}
-											/>
-										)}
-									<div className="invisible flex items-center justify-end gap-1.5 opacity-0 transition-[opacity,visibility] group-hover:visible group-hover:opacity-100">
-										{shortcutLabel && (
-											<span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-												{shortcutLabel}
-											</span>
-										)}
+								<div className="invisible flex items-center justify-end gap-1.5 opacity-0 transition-[opacity,visibility] group-hover:visible group-hover:opacity-100">
+									{shortcutLabel && (
+										<span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+											{shortcutLabel}
+										</span>
+									)}
+									{isMainWorkspace ? (
 										<Tooltip delayDuration={300}>
 											<TooltipTrigger asChild>
 												<button
 													type="button"
 													onClick={(event) => {
 														event.stopPropagation();
-														onDeleteClick();
+														onRemoveFromSidebarClick();
+													}}
+													onKeyDown={(event) => {
+														if (
+															event.key === "Enter" ||
+															event.key === " " ||
+															event.key === "Spacebar"
+														) {
+															event.stopPropagation();
+														}
+													}}
+													className="flex items-center justify-center text-muted-foreground hover:text-foreground"
+													aria-label="Remove from sidebar"
+												>
+													<HiMiniMinus className="size-3.5" />
+												</button>
+											</TooltipTrigger>
+											<TooltipContent side="top" sideOffset={4}>
+												<HotkeyLabel label="Remove from sidebar" />
+											</TooltipContent>
+										</Tooltip>
+									) : (
+										<Tooltip delayDuration={300}>
+											<TooltipTrigger asChild>
+												<button
+													type="button"
+													onClick={(event) => {
+														event.stopPropagation();
+														onCloseWorkspaceClick();
+													}}
+													onKeyDown={(event) => {
+														if (
+															event.key === "Enter" ||
+															event.key === " " ||
+															event.key === "Spacebar"
+														) {
+															event.stopPropagation();
+														}
 													}}
 													className="flex items-center justify-center text-muted-foreground hover:text-foreground"
 													aria-label="Close workspace"
@@ -280,14 +338,10 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 												/>
 											</TooltipContent>
 										</Tooltip>
-									</div>
-								</>
-							)}
-						</div>
-
-						<span className="col-start-1 row-start-2 truncate font-mono text-[11px] leading-tight text-muted-foreground/60">
-							{branch}
-						</span>
+									)}
+								</div>
+							</>
+						)}
 					</div>
 				</div>
 			</div>

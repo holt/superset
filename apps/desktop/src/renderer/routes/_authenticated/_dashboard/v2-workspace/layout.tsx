@@ -1,6 +1,12 @@
+import { buildHostRoutingKey } from "@superset/shared/host-routing";
 import { eq } from "@tanstack/db";
 import { useLiveQuery } from "@tanstack/react-db";
-import { createFileRoute, Outlet, useMatchRoute } from "@tanstack/react-router";
+import {
+	createFileRoute,
+	Outlet,
+	useMatchRoute,
+	useNavigate,
+} from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
 import { env } from "renderer/env.renderer";
 import {
@@ -21,6 +27,7 @@ export const Route = createFileRoute("/_authenticated/_dashboard/v2-workspace")(
 
 function V2WorkspaceLayout() {
 	const matchRoute = useMatchRoute();
+	const navigate = useNavigate();
 	const workspaceMatch = matchRoute({
 		to: "/v2-workspace/$workspaceId",
 	});
@@ -35,11 +42,12 @@ function V2WorkspaceLayout() {
 			q
 				.from({ v2Workspaces: collections.v2Workspaces })
 				.leftJoin({ hosts: collections.v2Hosts }, ({ v2Workspaces, hosts }) =>
-					eq(v2Workspaces.hostId, hosts.id),
+					eq(v2Workspaces.hostId, hosts.machineId),
 				)
 				.where(({ v2Workspaces }) => eq(v2Workspaces.id, workspaceId ?? ""))
 				.select(({ v2Workspaces, hosts }) => ({
 					id: v2Workspaces.id,
+					organizationId: v2Workspaces.organizationId,
 					hostId: v2Workspaces.hostId,
 					hostMachineId: hosts?.machineId ?? null,
 					projectId: v2Workspaces.projectId,
@@ -54,7 +62,7 @@ function V2WorkspaceLayout() {
 		? null
 		: isLocal
 			? activeHostUrl
-			: `${env.RELAY_URL}/hosts/${workspace.hostId}`;
+			: `${env.RELAY_URL}/hosts/${buildHostRoutingKey(workspace.organizationId, workspace.hostId)}`;
 
 	const lastEnsuredWorkspaceIdRef = useRef<string | null>(null);
 
@@ -64,6 +72,16 @@ function V2WorkspaceLayout() {
 		lastEnsuredWorkspaceIdRef.current = workspace.id;
 		ensureWorkspaceInSidebar(workspace.id, workspace.projectId);
 	}, [ensureWorkspaceInSidebar, workspace]);
+
+	useEffect(() => {
+		if (workspaceId && !isReady) {
+			void navigate({
+				to: "/v2-workspace-loading/$workspaceId",
+				params: { workspaceId },
+				replace: true,
+			});
+		}
+	}, [workspaceId, isReady, navigate]);
 
 	if (!workspaceId || !isReady) {
 		return null;
