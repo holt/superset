@@ -18,7 +18,7 @@ import {
 	parseRrule,
 } from "@superset/shared/rrule";
 import { TRPCError, type TRPCRouterRecord } from "@trpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, ilike } from "drizzle-orm";
 import { z } from "zod";
 import { env } from "../../env";
 import { protectedProcedure } from "../../trpc";
@@ -28,11 +28,22 @@ import {
 } from "../utils/active-org";
 import { dispatchAutomation } from "./dispatch";
 import {
+	getAutomationForUser,
+	promptSourceFromSession,
+	recordPromptVersion,
+} from "./helpers";
+import {
 	createAutomationSchema,
 	listRunsSchema,
 	parseRruleSchema,
+	setAutomationPromptSchema,
 	updateAutomationSchema,
 } from "./schema";
+import { automationVersionsRouter } from "./versions";
+
+function escapeLikePattern(value: string): string {
+	return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
 
 function requirePaidSubscription(subscription: SelectSubscription | null) {
 	if (
@@ -128,72 +139,79 @@ async function verifyProjectInOrg(organizationId: string, projectId: string) {
 	}
 }
 
-async function getAutomationForUser(
-	userId: string,
-	organizationId: string,
-	id: string,
-) {
-	const [automation] = await db
-		.select()
-		.from(automations)
-		.where(
-			and(
-				eq(automations.id, id),
-				eq(automations.organizationId, organizationId),
-			),
-		)
-		.limit(1);
-
-	if (!automation || automation.ownerUserId !== userId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "Automation not found",
-		});
-	}
-
-	return automation;
-}
-
 export const automationRouter = {
-	/** List automations scoped to the caller's active organization. */
-	list: protectedProcedure.query(async ({ ctx }) => {
-		const organizationId = await requireActiveOrgMembership(ctx);
+	versions: automationVersionsRouter,
 
-		const rows = await db
-			.select()
-			.from(automations)
-			.where(eq(automations.organizationId, organizationId))
-			.orderBy(desc(automations.createdAt));
+	/**
+	 * List automations scoped to the caller's active organization. The
+	 * `prompt` body is omitted — call `getPrompt` to fetch it for one row.
+	 */
+	list: protectedProcedure
+		.input(
+			z
+				.object({
+					name: z
+						.string()
+						.trim()
+						.min(1)
+						.optional()
+						.describe("Case-insensitive substring match on automation name."),
+				})
+				.optional(),
+		)
+		.query(async ({ ctx, input }) => {
+			const organizationId = await requireActiveOrgMembership(ctx);
 
-		return rows.map((row) => ({
-			...row,
-			scheduleText: safeDescribeRrule(row),
-		}));
-	}),
+			const { prompt: _prompt, ...summaryCols } = getTableColumns(automations);
+			const rows = await db
+				.select(summaryCols)
+				.from(automations)
+				.where(
+					and(
+						eq(automations.organizationId, organizationId),
+						input?.name
+							? ilike(automations.name, `%${escapeLikePattern(input.name)}%`)
+							: undefined,
+					),
+				)
+				.orderBy(desc(automations.createdAt));
 
-	/** Get one automation plus the last 10 runs. */
+			return rows.map((row) => ({
+				...row,
+				scheduleText: safeDescribeRrule(row),
+			}));
+		}),
+
+	/**
+	 * Get one automation's metadata. The `prompt` body is omitted (it can be
+	 * large markdown) — call `getPrompt` to fetch it. Use `listRuns` for
+	 * run history.
+	 */
 	get: protectedProcedure
 		.input(z.object({ id: z.string().uuid() }))
 		.query(async ({ ctx, input }) => {
 			const organizationId = await requireActiveOrgMembership(ctx);
-			const automation = await getAutomationForUser(
-				ctx.session.user.id,
-				organizationId,
-				input.id,
-			);
 
-			const recentRuns = await db
-				.select()
-				.from(automationRuns)
-				.where(eq(automationRuns.automationId, input.id))
-				.orderBy(desc(automationRuns.createdAt))
-				.limit(10);
+			const { prompt: _prompt, ...summaryCols } = getTableColumns(automations);
+			const [row] = await db
+				.select(summaryCols)
+				.from(automations)
+				.where(
+					and(
+						eq(automations.id, input.id),
+						eq(automations.organizationId, organizationId),
+					),
+				)
+				.limit(1);
 
-			return {
-				...automation,
-				scheduleText: safeDescribeRrule(automation),
-				recentRuns,
-			};
+			if (!row || row.ownerUserId !== ctx.session.user.id) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Automation not found",
+				});
+			}
+
+			return { ...row, scheduleText: safeDescribeRrule(row) };
 		}),
 
 	create: protectedProcedure
@@ -242,24 +260,43 @@ export const automationRouter = {
 				timezone: input.timezone,
 			});
 
-			const [created] = await dbWs
-				.insert(automations)
-				.values({
-					organizationId,
-					ownerUserId: ctx.session.user.id,
-					name: input.name,
-					prompt: input.prompt,
-					agentConfig: input.agentConfig,
-					targetHostId: input.targetHostId ?? null,
-					v2ProjectId,
-					v2WorkspaceId: input.v2WorkspaceId ?? null,
-					rrule: input.rrule,
-					dtstart,
-					timezone: input.timezone,
-					mcpScope: input.mcpScope,
-					nextRunAt,
-				})
-				.returning();
+			const created = await dbWs.transaction(async (tx) => {
+				const inserted = await tx
+					.insert(automations)
+					.values({
+						organizationId,
+						ownerUserId: ctx.session.user.id,
+						name: input.name,
+						prompt: input.prompt,
+						agentConfig: input.agentConfig,
+						targetHostId: input.targetHostId ?? null,
+						v2ProjectId,
+						v2WorkspaceId: input.v2WorkspaceId ?? null,
+						rrule: input.rrule,
+						dtstart,
+						timezone: input.timezone,
+						mcpScope: input.mcpScope,
+						nextRunAt,
+					})
+					.returning();
+
+				const row = inserted[0];
+				if (!row) {
+					throw new TRPCError({
+						code: "INTERNAL_SERVER_ERROR",
+						message: "Failed to create automation",
+					});
+				}
+
+				await recordPromptVersion(tx, {
+					automationId: row.id,
+					authorUserId: ctx.session.user.id,
+					content: input.prompt,
+					source: promptSourceFromSession(ctx.session),
+				});
+
+				return row;
+			});
 
 			return { ...created, scheduleText: safeDescribeRrule(created) };
 		}),
@@ -305,7 +342,6 @@ export const automationRouter = {
 				.update(automations)
 				.set({
 					name: input.name ?? existing.name,
-					prompt: input.prompt ?? existing.prompt,
 					agentConfig: input.agentConfig ?? existing.agentConfig,
 					targetHostId:
 						input.targetHostId === undefined
@@ -324,6 +360,59 @@ export const automationRouter = {
 				})
 				.where(eq(automations.id, input.id))
 				.returning();
+
+			return { ...updated, scheduleText: safeDescribeRrule(updated) };
+		}),
+
+	getPrompt: protectedProcedure
+		.input(z.object({ id: z.string().uuid() }))
+		.query(async ({ ctx, input }) => {
+			const organizationId = await requireActiveOrgMembership(ctx);
+			const existing = await getAutomationForUser(
+				ctx.session.user.id,
+				organizationId,
+				input.id,
+			);
+			return { id: existing.id, prompt: existing.prompt };
+		}),
+
+	setPrompt: protectedProcedure
+		.input(setAutomationPromptSchema)
+		.mutation(async ({ ctx, input }) => {
+			const organizationId = await requireActiveOrgMembership(ctx);
+			const existing = await getAutomationForUser(
+				ctx.session.user.id,
+				organizationId,
+				input.id,
+			);
+
+			if (existing.prompt === input.prompt) {
+				return { ...existing, scheduleText: safeDescribeRrule(existing) };
+			}
+
+			const updated = await dbWs.transaction(async (tx) => {
+				const [row] = await tx
+					.update(automations)
+					.set({ prompt: input.prompt })
+					.where(eq(automations.id, input.id))
+					.returning();
+
+				if (!row) {
+					throw new TRPCError({
+						code: "NOT_FOUND",
+						message: "Automation not found",
+					});
+				}
+
+				await recordPromptVersion(tx, {
+					automationId: input.id,
+					authorUserId: ctx.session.user.id,
+					content: input.prompt,
+					source: promptSourceFromSession(ctx.session),
+				});
+
+				return row;
+			});
 
 			return { ...updated, scheduleText: safeDescribeRrule(updated) };
 		}),

@@ -1,9 +1,11 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { isAbsolute, join, normalize, sep } from "node:path";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
-import { projects, pullRequests, workspaces } from "../../../db/schema";
+import { pullRequests, workspaces } from "../../../db/schema";
 import { protectedProcedure, queryProcedure, router } from "../../index";
+import { resolveGithubRepo } from "../workspace-creation/shared/project-helpers";
 import type {
 	ChangedFile,
 	CheckConclusionState,
@@ -16,6 +18,7 @@ import type {
 	PullRequestReviewThread,
 	PullRequestState,
 } from "./types";
+import { gitConfigWrite } from "./utils/config-write";
 import {
 	buildBranch,
 	countUntrackedFileLines,
@@ -33,6 +36,28 @@ import {
 } from "./utils/graphql";
 import { resolveWorktreePath } from "./utils/resolve-worktree";
 
+function assertSafeRelativePath(filePath: string): void {
+	if (isAbsolute(filePath)) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Absolute paths are not allowed",
+		});
+	}
+	const normalized = normalize(filePath);
+	if (normalized.split(sep).includes("..")) {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Path traversal is not allowed",
+		});
+	}
+	if (normalized === "" || normalized === ".") {
+		throw new TRPCError({
+			code: "BAD_REQUEST",
+			message: "Cannot target worktree root",
+		});
+	}
+}
+
 export const gitRouter = router({
 	listBranches: queryProcedure
 		.input(z.object({ workspaceId: z.string() }))
@@ -40,26 +65,31 @@ export const gitRouter = router({
 			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
 			const git = await ctx.git(worktreePath);
 
-			const currentBranchName = (
-				await git.revparse(["--abbrev-ref", "HEAD"]).catch(() => "")
-			).trim();
-			const base = await resolveBaseComparison(git);
-
-			let branchNames: string[] = [];
+			// `%(HEAD)` emits "*" for the checked-out branch, " " otherwise.
+			// Single spawn — independent of branch count. Only `name`/`isHead`
+			// are read by the v2 sidebar's BaseBranchSelector; the other
+			// per-branch fields the previous implementation computed (upstream,
+			// ahead/behind, last-commit) cost 4 spawns each and were unused.
+			let branches: { name: string; isHead: boolean }[] = [];
 			try {
 				const raw = await git.raw([
-					"branch",
-					"--list",
-					"--format=%(refname:short)",
+					"for-each-ref",
+					"refs/heads/",
+					"--format=%(HEAD)\t%(refname:short)",
 				]);
-				branchNames = raw.trim().split("\n").filter(Boolean);
+				branches = raw
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => {
+						const tab = line.indexOf("\t");
+						if (tab < 0) return { name: line, isHead: false };
+						return {
+							isHead: line.slice(0, tab) === "*",
+							name: line.slice(tab + 1),
+						};
+					});
 			} catch {}
-
-			const branches = await Promise.all(
-				branchNames.map((name) =>
-					buildBranch(git, name, name === currentBranchName, base?.baseRef),
-				),
-			);
 
 			return { branches };
 		}),
@@ -313,15 +343,17 @@ export const gitRouter = router({
 				});
 			}
 			if (input.baseBranch) {
-				await git.raw([
+				await gitConfigWrite(git, [
 					"config",
 					`branch.${currentBranch}.base`,
 					input.baseBranch,
 				]);
 			} else {
-				await git
-					.raw(["config", "--unset", `branch.${currentBranch}.base`])
-					.catch(() => {});
+				await gitConfigWrite(git, [
+					"config",
+					"--unset",
+					`branch.${currentBranch}.base`,
+				]).catch(() => {});
 			}
 			return { baseBranch: input.baseBranch };
 		}),
@@ -359,6 +391,107 @@ export const gitRouter = router({
 
 			await git.raw(["branch", "-m", input.oldName, input.newName]);
 			return { name: input.newName };
+		}),
+
+	discardChanges: protectedProcedure
+		.input(
+			z.object({
+				workspaceId: z.string(),
+				filePath: z.string(),
+			}),
+		)
+		.mutation(async ({ ctx, input }) => {
+			assertSafeRelativePath(input.filePath);
+			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
+			const git = await ctx.git(worktreePath);
+			const status = await git.status();
+			const isUntracked = status.not_added.includes(input.filePath);
+			if (isUntracked) {
+				await rm(join(worktreePath, input.filePath), { force: true });
+			} else {
+				await git.raw(["checkout", "HEAD", "--", input.filePath]);
+			}
+			return { success: true };
+		}),
+
+	discardAllUnstaged: protectedProcedure
+		.input(z.object({ workspaceId: z.string() }))
+		.mutation(async ({ ctx, input }) => {
+			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
+			const git = await ctx.git(worktreePath);
+			await git.raw(["checkout", "--", "."]);
+			await git.raw(["clean", "-fd"]);
+			return { success: true };
+		}),
+
+	discardAllStaged: protectedProcedure
+		.input(z.object({ workspaceId: z.string() }))
+		.mutation(async ({ ctx, input }) => {
+			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
+			const git = await ctx.git(worktreePath);
+			const status = await git.status();
+
+			// Files with a staged change (index entry differs from HEAD).
+			const stagedFiles = status.files.filter(
+				(f) => f.index !== " " && f.index !== "?",
+			);
+
+			const checkoutHeadPaths: string[] = [];
+			const resetPaths: string[] = [];
+			const deletePaths: string[] = [];
+
+			for (const f of stagedFiles) {
+				if (f.index === "A") {
+					// Staged-as-added: not in HEAD. Unstage + delete.
+					resetPaths.push(f.path);
+					deletePaths.push(f.path);
+				} else if (f.index === "R") {
+					// Staged rename: index has both delete-of-old and add-of-new.
+					// Unstage both ends, restore old from HEAD, delete new.
+					resetPaths.push(f.path);
+					deletePaths.push(f.path);
+					if (f.from) {
+						resetPaths.push(f.from);
+						checkoutHeadPaths.push(f.from);
+					}
+				} else if (f.index === "C") {
+					// Staged copy: source unchanged, dest is new in index.
+					resetPaths.push(f.path);
+					deletePaths.push(f.path);
+				} else {
+					// M, D, T: exists in HEAD; checkout reverts both index and WT.
+					checkoutHeadPaths.push(f.path);
+				}
+			}
+
+			if (resetPaths.length > 0) {
+				await git.raw(["reset", "HEAD", "--", ...resetPaths]);
+			}
+			if (checkoutHeadPaths.length > 0) {
+				await git.raw(["checkout", "HEAD", "--", ...checkoutHeadPaths]);
+			}
+			for (const filePath of deletePaths) {
+				await rm(join(worktreePath, filePath), { force: true });
+			}
+			return { success: true };
+		}),
+
+	stageAll: protectedProcedure
+		.input(z.object({ workspaceId: z.string() }))
+		.mutation(async ({ ctx, input }) => {
+			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
+			const git = await ctx.git(worktreePath);
+			await git.raw(["add", "-A"]);
+			return { success: true };
+		}),
+
+	unstageAll: protectedProcedure
+		.input(z.object({ workspaceId: z.string() }))
+		.mutation(async ({ ctx, input }) => {
+			const worktreePath = resolveWorktreePath(ctx, input.workspaceId);
+			const git = await ctx.git(worktreePath);
+			await git.raw(["reset", "HEAD"]);
+			return { success: true };
 		}),
 
 	getDiff: queryProcedure
@@ -594,17 +727,17 @@ export const gitRouter = router({
 				});
 			}
 
-			const project = ctx.db.query.projects
-				.findFirst({ where: eq(projects.id, workspace.projectId) })
-				.sync();
-			if (!project) {
-				throw new TRPCError({
-					code: "INTERNAL_SERVER_ERROR",
-					message: `Project ${workspace.projectId} not found in database`,
-				});
-			}
-			if (!project.repoOwner || !project.repoName) {
-				return { reviewThreads: [], conversationComments: [] };
+			let repo: { owner: string; name: string };
+			try {
+				repo = await resolveGithubRepo(ctx, workspace.projectId);
+			} catch (err) {
+				// Expected resolver failures (project not set up locally, no
+				// GitHub remote) degrade silently — the review tab just stays
+				// empty. Anything else is a real bug; propagate it.
+				if (err instanceof TRPCError) {
+					return { reviewThreads: [], conversationComments: [] };
+				}
+				throw err;
 			}
 
 			const octokit = await ctx.github();
@@ -614,8 +747,8 @@ export const gitRouter = router({
 				const result: GraphQLThreadsResult = await octokit.graphql(
 					REVIEW_THREADS_QUERY,
 					{
-						owner: project.repoOwner,
-						name: project.repoName,
+						owner: repo.owner,
+						name: repo.name,
 						prNumber: pr.prNumber,
 					},
 				);
@@ -633,8 +766,8 @@ export const gitRouter = router({
 				let hasMore = true;
 				while (hasMore) {
 					const { data: comments } = await octokit.issues.listComments({
-						owner: project.repoOwner,
-						repo: project.repoName,
+						owner: repo.owner,
+						repo: repo.name,
 						issue_number: pr.prNumber,
 						per_page: 100,
 						page,

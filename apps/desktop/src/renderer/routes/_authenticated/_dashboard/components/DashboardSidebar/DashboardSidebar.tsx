@@ -18,14 +18,23 @@ import {
 	verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
+import { cn } from "@superset/ui/utils";
+import { useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
+import { HiOutlineCog6Tooth } from "react-icons/hi2";
+import { V2AvailableBanner } from "renderer/components/V2AvailableBanner";
+import { useHotkeyDisplay } from "renderer/hotkeys";
 import { useDashboardSidebarState } from "renderer/routes/_authenticated/hooks/useDashboardSidebarState";
+import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import { DashboardSidebarHeader } from "./components/DashboardSidebarHeader";
+import { DashboardSidebarHelpMenu } from "./components/DashboardSidebarHelpMenu";
 import { DashboardSidebarHoverCardOverlay } from "./components/DashboardSidebarHoverCardOverlay";
 import { DashboardSidebarPortsList } from "./components/DashboardSidebarPortsList";
 import { DashboardSidebarProjectSection } from "./components/DashboardSidebarProjectSection";
 import { DashboardSidebarSectionRenameProvider } from "./components/DashboardSidebarSectionRenameContext";
+import { V2SetupScriptCard } from "./components/V2SetupScriptCard";
 import { useDashboardSidebarData } from "./hooks/useDashboardSidebarData";
 import { useDashboardSidebarShortcuts } from "./hooks/useDashboardSidebarShortcuts";
 import { DashboardSidebarHoverProvider } from "./providers/DashboardSidebarHoverProvider";
@@ -91,6 +100,13 @@ export function DashboardSidebar({
 		useDashboardSidebarData();
 	const workspaceShortcutLabels = useDashboardSidebarShortcuts(groups);
 	const { reorderProjects } = useDashboardSidebarState();
+	const navigate = useNavigate();
+	const matchRoute = useMatchRoute();
+	const settingsHotkey = useHotkeyDisplay("OPEN_SETTINGS").text;
+	const isSettingsOpen = !!matchRoute({ to: "/settings", fuzzy: true });
+	const { activeHostUrl } = useLocalHostService();
+	const v2RouteMatch = matchRoute({ to: "/v2-workspace/$workspaceId" });
+	const activeV2WorkspaceId = v2RouteMatch ? v2RouteMatch.workspaceId : null;
 
 	const sensors = useSensors(
 		useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
@@ -119,6 +135,26 @@ export function DashboardSidebar({
 			.map((id) => byId.get(id))
 			.filter((g): g is DashboardSidebarProject => g != null);
 	}, [groups, projectOrder]);
+
+	const activeV2Project = useMemo(() => {
+		if (!activeV2WorkspaceId) return null;
+		for (const project of groups) {
+			for (const child of project.children) {
+				if (
+					child.type === "workspace" &&
+					child.workspace.id === activeV2WorkspaceId
+				) {
+					return project;
+				}
+				if (child.type === "section") {
+					for (const ws of child.section.workspaces) {
+						if (ws.id === activeV2WorkspaceId) return project;
+					}
+				}
+			}
+		}
+		return null;
+	}, [groups, activeV2WorkspaceId]);
 
 	const handleDragEnd = useCallback(
 		({ active, over }: DragEndEvent) => {
@@ -194,6 +230,69 @@ export function DashboardSidebar({
 							</DndContext>
 						</div>
 						{!isCollapsed && <DashboardSidebarPortsList />}
+						{!isCollapsed && activeV2Project && activeHostUrl && (
+							<V2SetupScriptCard
+								hostUrl={activeHostUrl}
+								projectId={activeV2Project.id}
+								projectName={activeV2Project.name}
+							/>
+						)}
+						{!isCollapsed && <V2AvailableBanner />}
+						<div
+							className={cn(
+								"border-t border-border",
+								isCollapsed
+									? "flex flex-col items-center gap-1 py-1"
+									: "flex items-center gap-1 px-2 py-1",
+							)}
+						>
+							{isCollapsed ? (
+								<Tooltip delayDuration={300}>
+									<TooltipTrigger asChild>
+										<button
+											type="button"
+											aria-label="Settings"
+											onClick={() => navigate({ to: "/settings/account" })}
+											className={cn(
+												"flex size-8 items-center justify-center rounded-md transition-colors",
+												isSettingsOpen
+													? "bg-accent text-foreground"
+													: "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+											)}
+										>
+											<HiOutlineCog6Tooth className="size-4" />
+										</button>
+									</TooltipTrigger>
+									<TooltipContent side="right">Settings</TooltipContent>
+								</Tooltip>
+							) : (
+								<button
+									type="button"
+									onClick={() => navigate({ to: "/settings/account" })}
+									className={cn(
+										"group flex flex-1 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium transition-colors",
+										isSettingsOpen
+											? "bg-accent text-foreground"
+											: "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+									)}
+								>
+									<HiOutlineCog6Tooth className="size-4 shrink-0" />
+									<span className="flex-1 text-left">Settings</span>
+									{settingsHotkey !== "Unassigned" && (
+										<span
+											className={cn(
+												"shrink-0 text-[10px] font-mono tabular-nums text-muted-foreground/60",
+												"opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100",
+											)}
+										>
+											{settingsHotkey}
+										</span>
+									)}
+								</button>
+							)}
+
+							<DashboardSidebarHelpMenu isCollapsed={isCollapsed} />
+						</div>
 					</div>
 				</DashboardSidebarHoverCardOverlay>
 			</DashboardSidebarHoverProvider>

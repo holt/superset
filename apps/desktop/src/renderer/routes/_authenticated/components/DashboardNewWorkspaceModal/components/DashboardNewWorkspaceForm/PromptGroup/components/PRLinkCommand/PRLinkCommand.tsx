@@ -8,19 +8,18 @@ import {
 	CommandList,
 } from "@superset/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@superset/ui/popover";
+import { toast } from "@superset/ui/sonner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useId, useState } from "react";
-import { useHostTargetUrl } from "renderer/hooks/host-service/useHostTargetUrl";
+import { useEffect, useId, useRef, useState } from "react";
+import { useHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
 import { useDebouncedValue } from "renderer/hooks/useDebouncedValue";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
 import {
 	PRIcon,
 	type PRState,
 } from "renderer/screens/main/components/PRIcon/PRIcon";
-import type { WorkspaceHostTarget } from "../../../components/DevicePicker";
-
 export interface SelectedPR {
 	prNumber: number;
 	title: string;
@@ -33,7 +32,7 @@ interface PRLinkCommandProps {
 	tooltipLabel: string;
 	onSelect: (pr: SelectedPR) => void;
 	projectId: string | null;
-	hostTarget: WorkspaceHostTarget;
+	hostId: string | null;
 }
 
 function normalizeState(state: string, isDraft: boolean): string {
@@ -47,20 +46,20 @@ export function PRLinkCommand({
 	tooltipLabel,
 	onSelect,
 	projectId,
-	hostTarget,
+	hostId,
 }: PRLinkCommandProps) {
 	const [open, setOpen] = useState(false);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [showClosed, setShowClosed] = useState(false);
 	const showClosedId = useId();
 	const debouncedQuery = useDebouncedValue(searchQuery, 300);
-	const hostUrl = useHostTargetUrl(hostTarget);
+	const hostUrl = useHostUrl(hostId);
 
 	const trimmedQuery = searchQuery.trim();
 	const debouncedTrimmed = debouncedQuery.trim();
 	const isPendingDebounce = trimmedQuery !== debouncedTrimmed;
 
-	const { data, isFetching } = useQuery({
+	const { data, isFetching, error } = useQuery({
 		queryKey: [
 			"workspaceCreation",
 			"searchPullRequests",
@@ -80,7 +79,22 @@ export function PRLinkCommand({
 			});
 		},
 		enabled: !!projectId && !!hostUrl && open,
+		retry: false,
 	});
+
+	// One toast per error transition — without this, the dropdown's
+	// empty-state silently hides upstream tRPC failures.
+	const lastToastedError = useRef<string | null>(null);
+	useEffect(() => {
+		const msg = error instanceof Error ? error.message : null;
+		if (!msg) {
+			lastToastedError.current = null;
+			return;
+		}
+		if (lastToastedError.current === msg) return;
+		lastToastedError.current = msg;
+		toast.error(`Couldn't load pull requests: ${msg}`);
+	}, [error]);
 
 	const pullRequests = data?.pullRequests ?? [];
 	const repoMismatch =
@@ -144,19 +158,29 @@ export function PRLinkCommand({
 					<CommandList className="max-h-[280px]">
 						{pullRequests.length === 0 && (
 							<CommandEmpty>
-								{isLoading
-									? debouncedTrimmed
-										? "Searching..."
-										: "Loading..."
-									: repoMismatch
-										? `PR URL must match ${repoMismatch}.`
-										: debouncedTrimmed
-											? showClosed
-												? "No pull requests found."
-												: "No open pull requests found."
-											: showClosed
-												? "No pull requests found."
-												: "No open pull requests."}
+								{isLoading ? (
+									debouncedTrimmed ? (
+										"Searching..."
+									) : (
+										"Loading..."
+									)
+								) : error instanceof Error ? (
+									<span className="select-text cursor-text text-destructive">
+										{error.message}
+									</span>
+								) : repoMismatch ? (
+									`PR URL must match ${repoMismatch}.`
+								) : debouncedTrimmed ? (
+									showClosed ? (
+										"No pull requests found."
+									) : (
+										"No open pull requests found."
+									)
+								) : showClosed ? (
+									"No pull requests found."
+								) : (
+									"No open pull requests."
+								)}
 							</CommandEmpty>
 						)}
 						{pullRequests.length > 0 && (

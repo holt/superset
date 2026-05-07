@@ -22,7 +22,7 @@ import type {
 	V2WorkspaceHostType,
 } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/hooks/useAccessibleV2Workspaces";
 import {
-	DEVICE_FILTER_THIS_DEVICE,
+	DEVICE_FILTER_ALL,
 	PROJECT_FILTER_ALL,
 	useV2WorkspacesFilterStore,
 } from "renderer/routes/_authenticated/_dashboard/v2-workspaces/stores/v2WorkspacesFilterStore";
@@ -74,10 +74,9 @@ function compareWorkspaces(
 			cmp = a.createdAt.getTime() - b.createdAt.getTime();
 			break;
 	}
-	if (cmp === 0) {
-		cmp = b.createdAt.getTime() - a.createdAt.getTime();
-	}
-	return direction === "asc" ? cmp : -cmp;
+	const directional = direction === "asc" ? cmp : -cmp;
+	if (directional !== 0) return directional;
+	return b.createdAt.getTime() - a.createdAt.getTime();
 }
 
 function groupByProject(
@@ -142,8 +141,8 @@ export function V2WorkspacesList({ workspaces }: V2WorkspacesListProps) {
 	);
 	const resetFilters = useV2WorkspacesFilterStore((state) => state.reset);
 
-	const [sortField, setSortField] = useState<SortField>("created");
-	const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+	const [sortField, setSortField] = useState<SortField>("host");
+	const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
 	const handleSort = (field: SortField) => {
 		if (sortField === field) {
@@ -165,7 +164,7 @@ export function V2WorkspacesList({ workspaces }: V2WorkspacesListProps) {
 	);
 	const hasActiveFilters =
 		searchQuery.trim() !== "" ||
-		deviceFilter !== DEVICE_FILTER_THIS_DEVICE ||
+		deviceFilter !== DEVICE_FILTER_ALL ||
 		projectFilter !== PROJECT_FILTER_ALL;
 
 	const columnHeader = (
