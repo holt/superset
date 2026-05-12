@@ -9,6 +9,7 @@ export interface SetupConfig {
 	teardown?: string[];
 	run?: string[];
 	env?: Record<string, EnvValue>;
+	cwd?: string;
 }
 
 export interface LocalScriptMerge {

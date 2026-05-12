@@ -73,6 +73,13 @@ function readConfigFile(configPath: string): SetupConfig | null {
 			}
 		}
 
+		if (parsed.cwd !== undefined) {
+			if (typeof parsed.cwd !== "string" || parsed.cwd.trim().length === 0) {
+				throw new Error("'cwd' field must be a non-empty string");
+			}
+			parsed.cwd = parsed.cwd.trim();
+		}
+
 		return parsed;
 	} catch (error) {
 		console.error(
@@ -167,6 +174,7 @@ function mergeBaseConfigs(
 		env: override.env
 			? { ...base.env, ...override.env }
 			: base.env,
+		cwd: override.cwd ?? base.cwd,
 	};
 }
 

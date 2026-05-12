@@ -1,6 +1,6 @@
 ---
 name: superset
-description: Drives the Superset CLI to orchestrate coding agents across devices. Use when the user wants to spawn an agent, create or manage workspaces, schedule automations, or interact with Superset projects, hosts, or tasks from the terminal.
+description: Create workspaces, spawn agents, schedule automations, and manage Superset projects/tasks/hosts via the `superset` CLI. Use to orchestrate coding agents across devices from the terminal.
 allowed-tools: Bash(superset:*)
 ---
 
@@ -32,6 +32,7 @@ If `$SUPERSET_WORKSPACE_ID` is unset, you're not inside a Superset workspace —
 superset workspaces create --project <id> --host <id> --name "..." --branch <branch>
 superset workspaces create --project <id> --local --name "..." --pr <number>
 superset workspaces list [--host <id> | --local]
+superset workspaces update <id> --name "..."
 superset workspaces delete <id> [<id>...]
 ```
 
