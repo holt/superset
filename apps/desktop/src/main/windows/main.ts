@@ -39,6 +39,15 @@ import { getWorkspaceRuntimeRegistry } from "../lib/workspace-runtime";
 // Singleton IPC handler to prevent duplicate handlers on window reopen (macOS)
 let ipcHandler: ReturnType<typeof createIPCHandler> | null = null;
 
+// Crash-loop guard: if the renderer dies more than this many times within the
+// window, stop auto-reloading so the user can see the broken state instead of
+// watching the window flap.
+const CRASH_LOOP_WINDOW_MS = 30_000;
+const CRASH_LOOP_THRESHOLD = 3;
+// Wait a beat after `did-finish-load` so the renderer's notifications
+// subscription is mounted before we emit the recovery toast event.
+const RECOVERY_TOAST_DELAY_MS = 1_000;
+
 function getWorkspaceNameFromDb(workspaceId: string | undefined): string {
 	if (!workspaceId) return "Workspace";
 	try {
@@ -261,6 +270,8 @@ export async function MainWindow() {
 	// write isMaximized: true back to disk before the user touches the window.
 	let initialized = false;
 	let hasCompletedFirstLoad = false;
+	let crashTimestamps: number[] = [];
+	let pendingCrashRecoveryToast = false;
 	let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 	const debouncedSave = () => {
 		if (!initialized || window.isDestroyed()) return;
@@ -308,6 +319,13 @@ export async function MainWindow() {
 			initialized = true;
 			hasCompletedFirstLoad = true;
 		}
+
+		if (pendingCrashRecoveryToast) {
+			pendingCrashRecoveryToast = false;
+			setTimeout(() => {
+				notificationsEmitter.emit(NOTIFICATION_EVENTS.RENDERER_RECOVERED);
+			}, RECOVERY_TOAST_DELAY_MS);
+		}
 	});
 
 	window.webContents.on(
@@ -325,6 +343,32 @@ export async function MainWindow() {
 	window.webContents.on("render-process-gone", (_event, details) => {
 		console.error("[main-window] Renderer process gone:", details);
 		log.error("[main-window] Renderer process gone", details);
+
+		// Only recover from real crashes/aborts. `clean-exit` is shutdown;
+		// `killed` is intentional (e.g. via task manager) and the user can
+		// reopen the window themselves.
+		if (details.reason !== "crashed" && details.reason !== "abnormal-exit") {
+			return;
+		}
+
+		const now = Date.now();
+		crashTimestamps = crashTimestamps.filter(
+			(t) => now - t < CRASH_LOOP_WINDOW_MS,
+		);
+		crashTimestamps.push(now);
+
+		if (crashTimestamps.length > CRASH_LOOP_THRESHOLD) {
+			log.error(
+				`[main-window] Renderer crashed ${crashTimestamps.length} times within ${CRASH_LOOP_WINDOW_MS}ms — skipping auto-reload to avoid a crash loop`,
+			);
+			return;
+		}
+
+		if (window.isDestroyed()) return;
+
+		pendingCrashRecoveryToast = true;
+		log.info("[main-window] Auto-reloading renderer after crash");
+		window.webContents.reload();
 	});
 
 	window.webContents.on("preload-error", (_event, preloadPath, error) => {

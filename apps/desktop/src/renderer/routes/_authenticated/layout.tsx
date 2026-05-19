@@ -1,5 +1,6 @@
 import { WorkerPoolContextProvider } from "@pierre/diffs/react";
 import { Button } from "@superset/ui/button";
+import { toast } from "@superset/ui/sonner";
 import { Spinner } from "@superset/ui/spinner";
 import {
 	createFileRoute,
@@ -72,6 +73,14 @@ function AuthenticatedLayout() {
 	// Update workspace-run pane state on terminal exit
 	electronTrpc.notifications.subscribe.useSubscription(undefined, {
 		onData: (event) => {
+			if (event.type === NOTIFICATION_EVENTS.RENDERER_RECOVERED) {
+				toast.error("Window crashed and was restored", {
+					description:
+						"The app window recovered from a renderer crash. Recent unsaved UI state may be lost.",
+				});
+				return;
+			}
+
 			if (
 				event.type === NOTIFICATION_EVENTS.FOCUS_V2_NOTIFICATION_SOURCE &&
 				event.data

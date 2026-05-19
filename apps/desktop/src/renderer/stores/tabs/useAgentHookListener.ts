@@ -52,6 +52,7 @@ export function useAgentHookListener() {
 
 	electronTrpc.notifications.subscribe.useSubscription(undefined, {
 		onData: (event) => {
+			if (event.type === NOTIFICATION_EVENTS.RENDERER_RECOVERED) return;
 			if (!event.data) return;
 			if (event.type === NOTIFICATION_EVENTS.FOCUS_V2_NOTIFICATION_SOURCE) {
 				return;

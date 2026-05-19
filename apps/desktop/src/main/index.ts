@@ -28,6 +28,7 @@ import { initAppState } from "./lib/app-state";
 import { requestAppleEventsAccess } from "./lib/apple-events-permission";
 import { isUpdateReadyToInstall, setupAutoUpdater } from "./lib/auto-updater";
 import { installBundledCliShim } from "./lib/bundled-cli";
+import { initCrashReporter } from "./lib/crash-reporter";
 import { resolveDevWorkspaceName } from "./lib/dev-workspace-name";
 import { setWorkspaceDockIcon } from "./lib/dock-icon";
 import { loadWebviewBrowserExtension } from "./lib/extensions";
@@ -54,6 +55,20 @@ import { MainWindow } from "./windows/main";
 
 console.log("[main] Local database ready:", !!localDb);
 const IS_DEV = process.env.NODE_ENV === "development";
+
+// Must run before app.whenReady() so Chromium captures early renderer crashes.
+initCrashReporter();
+
+// Linux: Ubuntu 22.04 (and derivatives like Linux Mint 21.x) ship libva 2.14
+// which Chromium's VAAPI wrapper rejects as too old, aborting the renderer
+// process (SIGTRAP / exitCode 133). Disabling VAAPI hw video accel sidesteps
+// the abort — Superset doesn't play video, so the loss is negligible.
+if (PLATFORM.IS_LINUX) {
+	app.commandLine.appendSwitch(
+		"disable-features",
+		"VaapiVideoDecoder,VaapiVideoEncoder",
+	);
+}
 
 void applyShellEnvToProcess().catch((error) => {
 	console.error("[main] Failed to apply shell environment:", error);

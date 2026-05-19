@@ -34,6 +34,7 @@ export const NOTIFICATION_EVENTS = {
 	FOCUS_TAB: "focus-tab",
 	FOCUS_V2_NOTIFICATION_SOURCE: "focus-v2-notification-source",
 	TERMINAL_EXIT: "terminal-exit",
+	RENDERER_RECOVERED: "renderer-recovered",
 } as const;
 
 // Development/testing mock values (used when SKIP_ENV_VALIDATION is set)
