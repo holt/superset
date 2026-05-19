@@ -48,6 +48,26 @@ const desktopDevOrigins =
 			]
 		: [];
 
+function serializeCancellationDetails(
+	cancellationDetails?: Stripe.Subscription.CancellationDetails | null,
+) {
+	try {
+		if (!cancellationDetails) return undefined;
+
+		return {
+			comment: cancellationDetails.comment,
+			feedback: cancellationDetails.feedback,
+			reason: cancellationDetails.reason,
+		};
+	} catch (error) {
+		console.error(
+			"[stripe/subscription-cancel] Failed to serialize cancellation details:",
+			error,
+		);
+		return undefined;
+	}
+}
+
 export const auth = betterAuth({
 	baseURL: env.NEXT_PUBLIC_API_URL,
 	secret: env.BETTER_AUTH_SECRET,
@@ -310,7 +330,7 @@ export const auth = betterAuth({
 			},
 			organizationHooks: {
 				beforeCreateInvitation: async (data) => {
-					const { inviterId, organizationId, role } = data.invitation;
+					const { inviterId, organizationId, role, teamId } = data.invitation;
 
 					const { success } = await invitationRateLimit.limit(inviterId);
 					if (!success) {
@@ -337,6 +357,19 @@ export const auth = betterAuth({
 						)
 					) {
 						throw new Error("Cannot invite users with this role");
+					}
+
+					if (!teamId) {
+						const oldestTeam = await db.query.teams.findFirst({
+							where: eq(authSchema.teams.organizationId, organizationId),
+							orderBy: asc(authSchema.teams.createdAt),
+							columns: { id: true },
+						});
+						if (oldestTeam) {
+							return {
+								data: { ...data.invitation, teamId: oldestTeam.id },
+							};
+						}
 					}
 				},
 
@@ -814,7 +847,11 @@ export const auth = betterAuth({
 					}
 				},
 
-				getCheckoutSessionParams: async ({ user, plan, subscription }) => {
+				getCheckoutSessionParams: async (
+					{ user, plan, subscription },
+					_request,
+					ctx,
+				) => {
 					if (plan.name === "enterprise") {
 						throw new Error(
 							"Enterprise subscriptions are managed by admins. Contact founders@superset.sh.",
@@ -828,10 +865,14 @@ export const auth = betterAuth({
 						),
 					});
 
+					const annual = Boolean(
+						(ctx?.body as { annual?: boolean } | undefined)?.annual,
+					);
+
 					return {
 						params: {
 							customer: org?.stripeCustomerId ?? undefined,
-							allow_promotion_codes: true,
+							allow_promotion_codes: !annual,
 							billing_address_collection: "required",
 							metadata: {
 								organizationId: org?.id ?? "",
@@ -899,7 +940,11 @@ export const auth = betterAuth({
 					}
 				},
 
-				onSubscriptionCancel: async ({ subscription, stripeSubscription }) => {
+				onSubscriptionCancel: async ({
+					subscription,
+					stripeSubscription,
+					cancellationDetails,
+				}) => {
 					const org = await db.query.organizations.findFirst({
 						where: eq(authSchema.organizations.id, subscription.referenceId),
 					});
@@ -936,6 +981,10 @@ export const auth = betterAuth({
 							body: {
 								eventType: "subscription_cancelled",
 								stripeSubscriptionId: stripeSubscription.id,
+								cancellationDetails: serializeCancellationDetails(
+									cancellationDetails ??
+										stripeSubscription.cancellation_details,
+								),
 							},
 							retries: 3,
 						});

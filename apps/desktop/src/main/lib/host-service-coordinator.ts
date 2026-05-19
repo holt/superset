@@ -13,6 +13,7 @@ import { SUPERSET_HOME_DIR } from "./app-environment";
 import {
 	type HostServiceManifest,
 	isProcessAlive,
+	killProcess,
 	listManifests,
 	manifestDir,
 	readManifest,
@@ -119,7 +120,7 @@ export class HostServiceCoordinator extends EventEmitter {
 		instance.status = "stopped";
 
 		try {
-			process.kill(instance.pid, "SIGTERM");
+			killProcess(instance.pid, "SIGTERM");
 		} catch {}
 
 		this.instances.delete(organizationId);
@@ -147,6 +148,21 @@ export class HostServiceCoordinator extends EventEmitter {
 			try {
 				await this.tryAdopt(manifest.organizationId);
 			} catch {
+				removeManifest(manifest.organizationId);
+			}
+		}
+	}
+
+	async teardownKnownManifests(): Promise<void> {
+		for (const manifest of listManifests()) {
+			const verified = await pollHealthCheck(
+				manifest.endpoint,
+				manifest.authToken,
+				ADOPT_HEALTH_CHECK_TIMEOUT_MS,
+			);
+			if (verified) {
+				this.killManifestProcess(manifest.organizationId, manifest, "stale");
+			} else {
 				removeManifest(manifest.organizationId);
 			}
 		}
@@ -181,7 +197,7 @@ export class HostServiceCoordinator extends EventEmitter {
 
 		if (manifestPid != null && isProcessAlive(manifestPid)) {
 			try {
-				process.kill(manifestPid, "SIGKILL");
+				killProcess(manifestPid, "SIGKILL");
 			} catch (error) {
 				log.warn(
 					`[host-service:${organizationId}] reset: SIGKILL of pid=${manifestPid} failed`,
@@ -332,13 +348,24 @@ export class HostServiceCoordinator extends EventEmitter {
 			const reason = manifest.spawnedByAppVersion
 				? `spawned by app ${manifest.spawnedByAppVersion} != current ${currentAppVersion}`
 				: "no recorded app version (pre-upgrade manifest)";
-			log.info(
-				`[host-service:${organizationId}] Adopted service ${reason}, killing`,
+			const verified = await pollHealthCheck(
+				manifest.endpoint,
+				manifest.authToken,
+				ADOPT_HEALTH_CHECK_TIMEOUT_MS,
 			);
-			try {
-				process.kill(manifest.pid, "SIGTERM");
-			} catch {}
-			removeManifest(organizationId);
+
+			if (verified) {
+				log.info(
+					`[host-service:${organizationId}] Refusing to adopt stale service (${reason}); killing and respawning`,
+				);
+				this.killManifestProcess(organizationId, manifest, "stale");
+			} else {
+				log.warn(
+					`[host-service:${organizationId}] Stale manifest (${reason}) did not verify on ${manifest.endpoint}; removing manifest and respawning without kill`,
+				);
+				removeManifest(organizationId);
+			}
+
 			return null;
 		}
 
@@ -355,18 +382,7 @@ export class HostServiceCoordinator extends EventEmitter {
 			log.info(
 				`[host-service:${organizationId}] Adopted pid=${manifest.pid} did not respond on ${manifest.endpoint}, killing and respawning`,
 			);
-			try {
-				process.kill(manifest.pid, "SIGKILL");
-			} catch (error) {
-				// ESRCH (already gone) is fine; anything else (EPERM) we want to see.
-				if ((error as NodeJS.ErrnoException)?.code !== "ESRCH") {
-					log.warn(
-						`[host-service:${organizationId}] SIGKILL of stale pid=${manifest.pid} failed`,
-						error,
-					);
-				}
-			}
-			removeManifest(organizationId);
+			this.killManifestProcess(organizationId, manifest, "unhealthy");
 			return null;
 		}
 
@@ -397,6 +413,25 @@ export class HostServiceCoordinator extends EventEmitter {
 		}
 
 		return manifest;
+	}
+
+	private killManifestProcess(
+		organizationId: string,
+		manifest: HostServiceManifest,
+		reason: "stale" | "unhealthy",
+	): void {
+		try {
+			killProcess(manifest.pid, "SIGKILL");
+		} catch (error) {
+			// ESRCH (already gone) is fine; anything else (EPERM) we want to see.
+			if ((error as NodeJS.ErrnoException)?.code !== "ESRCH") {
+				log.warn(
+					`[host-service:${organizationId}] SIGKILL of ${reason} pid=${manifest.pid} failed`,
+					error,
+				);
+			}
+		}
+		removeManifest(organizationId);
 	}
 
 	// ── Spawn ─────────────────────────────────────────────────────────
@@ -443,7 +478,7 @@ export class HostServiceCoordinator extends EventEmitter {
 		let child: ReturnType<typeof childProcess.spawn>;
 		try {
 			// Prod: detached so PTYs survive Electron restarts via manifest
-			// adoption (HOST_SERVICE_LIFECYCLE.md). Dev: attached so a `bun dev`
+			// adoption (docs/HOST_SERVICE_LIFECYCLE.md). Dev: attached so a `bun dev`
 			// kill propagates and serve.ts's dev shutdown can stop pty-daemon.
 			child = childProcess.spawn(process.execPath, [this.scriptPath], {
 				detached: !isDev,
@@ -520,6 +555,9 @@ export class HostServiceCoordinator extends EventEmitter {
 		const childEnv = await getProcessEnvWithShellPath({
 			...(process.env as Record<string, string>),
 			ELECTRON_RUN_AS_NODE: "1",
+			NODE_ENV: app.isPackaged
+				? "production"
+				: (process.env.NODE_ENV ?? "development"),
 			ORGANIZATION_ID: organizationId,
 			HOST_CLIENT_ID: getHostId(),
 			HOST_NAME: getHostName(),

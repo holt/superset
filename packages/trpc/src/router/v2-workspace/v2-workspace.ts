@@ -147,6 +147,8 @@ export const v2WorkspaceRouter = {
 					projectId: v2Workspaces.projectId,
 					projectName: v2Projects.name,
 					hostId: v2Workspaces.hostId,
+					type: v2Workspaces.type,
+					createdAt: v2Workspaces.createdAt,
 				})
 				.from(v2Workspaces)
 				.innerJoin(
@@ -179,6 +181,8 @@ export const v2WorkspaceRouter = {
 				projectId: row.projectId,
 				projectName: row.projectName ?? "",
 				hostId: row.hostId,
+				type: row.type,
+				createdAt: row.createdAt,
 			}));
 		}),
 
@@ -396,6 +400,7 @@ export const v2WorkspaceRouter = {
 				name: z.string().min(1).optional(),
 				branch: z.string().min(1).optional(),
 				hostId: z.string().min(1).optional(),
+				taskId: z.string().uuid().nullable().optional(),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
@@ -412,10 +417,30 @@ export const v2WorkspaceRouter = {
 				await getScopedHost(workspace.organizationId, input.hostId);
 			}
 
+			if (input.taskId) {
+				const found = await dbWs.query.tasks.findFirst({
+					columns: { id: true, organizationId: true },
+					where: eq(tasks.id, input.taskId),
+				});
+				if (!found) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: "taskId not found",
+					});
+				}
+				if (found.organizationId !== workspace.organizationId) {
+					throw new TRPCError({
+						code: "FORBIDDEN",
+						message: "taskId must belong to the workspace's organization",
+					});
+				}
+			}
+
 			const data = {
 				branch: input.branch,
 				hostId: input.hostId,
 				name: input.name,
+				taskId: input.taskId,
 			};
 			if (
 				Object.keys(data).every(
