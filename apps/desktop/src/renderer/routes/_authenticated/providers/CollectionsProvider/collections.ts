@@ -37,6 +37,7 @@ import type {
 } from "@tanstack/react-db";
 import {
 	createCollection,
+	localOnlyCollectionOptions,
 	localStorageCollectionOptions,
 } from "@tanstack/react-db";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
@@ -64,6 +65,14 @@ const columnMapper = snakeCamelMapper();
 
 const electricUrl = `${env.NEXT_PUBLIC_ELECTRIC_URL}/v1/shape`;
 
+// SKIP_ENV_VALIDATION is the dev-mode bypass that fakes a "signed-in" session
+// with MOCK_ORG_ID. In that mode there's no real JWT, so every shape-stream
+// request 401s and @electric-sql/client retries forever — across ~26
+// collections this leaks until the renderer OOMs (PartitionAlloc abort).
+// Skip Electric entirely in mock mode: return empty in-memory collections
+// instead. useLiveQuery consumers see [] rather than the same 401-flapping [].
+const MOCK_MODE = env.SKIP_ENV_VALIDATION;
+
 const persistence = createElectronSQLitePersistence({
 	invoke: (channel, request) => window.ipcRenderer.invoke(channel, request),
 });
@@ -81,6 +90,15 @@ const createIndexedCollection = ((
 
 type ElectricSyncConfig = ReturnType<typeof electricCollectionOptions>;
 const createPersistedElectricCollection = ((config: ElectricSyncConfig) => {
+	if (MOCK_MODE) {
+		return createCollection(
+			localOnlyCollectionOptions({
+				id: config.id,
+				// biome-ignore lint/suspicious/noExplicitAny: getKey narrows per call site; local-only just needs a key fn
+				getKey: config.getKey as any,
+			}),
+		);
+	}
 	const persisted = persistedCollectionOptions({
 		...config,
 		persistence,

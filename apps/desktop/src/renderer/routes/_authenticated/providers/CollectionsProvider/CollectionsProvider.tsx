@@ -22,6 +22,10 @@ export function preloadActiveOrganizationCollections(
 	activeOrganizationId: string | null | undefined,
 ): void {
 	if (!activeOrganizationId) return;
+	// In SKIP_ENV_VALIDATION mode, collections are local-only stubs (see
+	// collections.ts). Preloading them would still no-op, but skipping is
+	// cheaper and avoids touching the persistence layer.
+	if (env.SKIP_ENV_VALIDATION) return;
 	void preloadCollections(activeOrganizationId).catch((error) => {
 		console.error(
 			"[collections-provider] Failed to preload active org collections:",
@@ -43,7 +47,9 @@ export function CollectionsProvider({ children }: { children: ReactNode }) {
 			setIsSwitching(true);
 			try {
 				await authClient.organization.setActive({ organizationId });
-				await preloadCollections(organizationId);
+				if (!env.SKIP_ENV_VALIDATION) {
+					await preloadCollections(organizationId);
+				}
 				await refetchSession();
 			} finally {
 				setIsSwitching(false);
