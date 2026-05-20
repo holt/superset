@@ -170,6 +170,17 @@ function resolveWebviewExtensionPath(): string | null {
 export async function loadReactDevToolsExtension(): Promise<void> {
 	if (env.NODE_ENV !== "development") return;
 
+	// Opt-in: RDT v7 retains every performance.measure() entry it records
+	// (~1.98M PerformanceMeasure objects per 1.5h session in a heap snapshot,
+	// 230 MB), eventually OOMing the renderer in PartitionAlloc. Default to
+	// skipping the load; set SUPERSET_ENABLE_REACT_DEVTOOLS=1 to opt in.
+	if (process.env.SUPERSET_ENABLE_REACT_DEVTOOLS !== "1") {
+		console.log(
+			"[main] React DevTools load skipped — set SUPERSET_ENABLE_REACT_DEVTOOLS=1 to enable",
+		);
+		return;
+	}
+
 	const extensionPath = resolveReactDevToolsPath();
 	if (!extensionPath) {
 		console.warn(
