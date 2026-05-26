@@ -34,7 +34,6 @@ export function useWorkspaceHostTarget(
 				.select(({ workspaces }) => ({
 					organizationId: workspaces.organizationId,
 					hostId: workspaces.hostId,
-					isSynced: workspaces.$synced,
 				})),
 		[collections, workspaceId],
 	);
@@ -42,9 +41,8 @@ export function useWorkspaceHostTarget(
 	const match = workspaceId ? (workspaceRows[0] ?? null) : null;
 
 	return useMemo(() => {
-		if (!workspaceId || !isReady) return { status: "loading" };
+		if (!workspaceId || (!isReady && !match)) return { status: "loading" };
 		if (!match) return { status: "not-found" };
-		if (!match.isSynced) return { status: "loading" };
 		if (machineId && match.hostId === machineId) {
 			if (activeHostUrl) {
 				return {
