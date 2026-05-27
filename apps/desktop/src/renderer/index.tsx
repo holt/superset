@@ -1,3 +1,5 @@
+// Must run before react-dom is evaluated; see module for rationale.
+import "./lib/disable-react-perf-tracks";
 import { initSentry } from "./lib/sentry";
 
 initSentry();
