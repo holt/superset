@@ -203,7 +203,6 @@ export interface WorkspaceCreateResult {
 	terminals: Array<{ terminalId: string; label?: string }>;
 	agents: WorkspaceCreateAgentResult[];
 	alreadyExists: boolean;
-	warnings: string[];
 }
 
 export interface WorkspaceUpdateParams {
@@ -229,7 +228,11 @@ export interface WorkspaceUpdateResult {
 }
 
 export interface WorkspaceDeleteResult {
-	[key: string]: unknown;
+	success: boolean;
+	cloudDeleted?: boolean;
+	worktreeRemoved?: boolean;
+	branchDeleted?: boolean;
+	warnings?: string[];
 }
 
 export declare namespace Workspaces {
