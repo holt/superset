@@ -13,8 +13,15 @@ interface WorktreeLocationPickerProps {
 }
 
 export function useDefaultWorktreePath() {
-	const { data: homeDir } = electronTrpc.window.getHomeDir.useQuery();
-	return homeDir ? `${homeDir}/.superset/worktrees` : "~/.superset/worktrees";
+	// Derive from SUPERSET_HOME_DIR (honors a relocated home dir) rather than a
+	// hardcoded `~/.superset`. A dot-prefixed worktree root makes glob-based lint
+	// rules (e.g. postcss-modules) silently skip files, so the default must match
+	// whatever non-dot home the backend resolves worktrees under.
+	const { data: supersetHomeDir } =
+		electronTrpc.window.getSupersetHomeDir.useQuery();
+	return supersetHomeDir
+		? `${supersetHomeDir}/worktrees`
+		: "~/.superset/worktrees";
 }
 
 export function WorktreeLocationPicker({

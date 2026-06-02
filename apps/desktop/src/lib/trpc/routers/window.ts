@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import type { BrowserWindow } from "electron";
 import { dialog } from "electron";
+import { SUPERSET_HOME_DIR } from "main/lib/app-environment";
 import { getImageMimeType } from "shared/file-types";
 import { z } from "zod";
 import { publicProcedure, router } from "..";
@@ -45,6 +46,10 @@ export const createWindowRouter = (getWindow: () => BrowserWindow | null) => {
 
 		getHomeDir: publicProcedure.query(() => {
 			return homedir();
+		}),
+
+		getSupersetHomeDir: publicProcedure.query(() => {
+			return SUPERSET_HOME_DIR;
 		}),
 
 		getDirectoryStatus: publicProcedure
