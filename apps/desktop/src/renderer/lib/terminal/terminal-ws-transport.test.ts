@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	jest,
+	setSystemTime,
+	test,
+} from "bun:test";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import { connect, createTransport } from "./terminal-ws-transport";
 
@@ -63,6 +71,13 @@ class MockWebSocket {
 
 const originalWebSocket = globalThis.WebSocket;
 
+// `window` is aliased to `globalThis` by the xterm-env-polyfill preload, and
+// `globalThis.addEventListener` is absent on Linux CI runtimes, so the transport's
+// `window.addEventListener` call throws there. Guarantee the methods exist.
+const win = globalThis.window as unknown as Record<string, unknown> | undefined;
+const originalAddEventListener = win?.addEventListener;
+const originalRemoveEventListener = win?.removeEventListener;
+
 function createMockTerminal(
 	cols = 101,
 	rows = 27,
@@ -86,10 +101,22 @@ function createMockTerminal(
 beforeEach(() => {
 	MockWebSocket.instances = [];
 	globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+	if (win && typeof win.addEventListener !== "function") {
+		win.addEventListener = () => {};
+	}
+	if (win && typeof win.removeEventListener !== "function") {
+		win.removeEventListener = () => {};
+	}
 });
 
 afterEach(() => {
 	globalThis.WebSocket = originalWebSocket;
+	if (win) {
+		win.addEventListener = originalAddEventListener;
+		win.removeEventListener = originalRemoveEventListener;
+	}
+	setSystemTime();
+	jest.useRealTimers();
 });
 
 describe("terminal-ws-transport", () => {
@@ -155,5 +182,29 @@ describe("terminal-ws-transport", () => {
 			{ type: "resize", cols: 101, rows: 27 },
 			{ type: "input", data: "b" },
 		]);
+	});
+
+	test("recovers a half-open socket after the machine resumes from sleep", () => {
+		jest.useFakeTimers();
+		setSystemTime(new Date("2026-01-01T00:00:00Z"));
+
+		const transport = createTransport();
+		connect(transport, createMockTerminal(), "ws://host/terminal/t1");
+
+		const socket = MockWebSocket.instances[0];
+		if (!socket) throw new Error("expected websocket instance");
+		socket.open();
+		socket.message(JSON.stringify({ type: "attached", terminalId: "t1" }));
+		expect(transport.connectionState).toBe("open");
+
+		// Laptop sleeps: the socket dies but never observes it. readyState stays
+		// OPEN and no `close` is delivered — that silent death is the bug. Two
+		// minutes pass (clock jumps), then the watchdog tick runs on wake.
+		setSystemTime(new Date("2026-01-01T00:02:00Z"));
+		jest.advanceTimersByTime(120_000);
+
+		// Recovery: the wall-clock-gap watchdog drops the wedged socket and dials
+		// a fresh one. Without it, only the original socket would ever exist.
+		expect(MockWebSocket.instances.length).toBe(2);
 	});
 });
