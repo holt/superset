@@ -1,5 +1,4 @@
 import { isV2OnlyUser } from "@superset/shared/v2-only-user";
-import { env } from "renderer/env.renderer";
 import { authClient } from "renderer/lib/auth-client";
 import { useV2LocalOverrideStore } from "renderer/stores/v2-local-override";
 
@@ -16,6 +15,9 @@ export function useIsV2OnlyUser(): boolean {
 export function useIsV2CloudEnabled(): boolean {
 	const v2Only = useIsV2OnlyUser();
 	const optInV2 = useV2LocalOverrideStore((s) => s.optInV2);
-	// Dev builds default to v2; an explicit opt-out (optInV2 === false) still wins.
-	return optInV2 ?? (v2Only || env.NODE_ENV === "development");
+	// Fork-local: do NOT default dev builds to v2. This is a v1 setup whose
+	// workspaces live in local.db; upstream's dev-defaults-to-v2 hid them on
+	// every restart (the localStorage opt-out doesn't survive origin changes).
+	// Explicit opt-in still wins; v2-only accounts still get v2.
+	return optInV2 ?? v2Only;
 }
