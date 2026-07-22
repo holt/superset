@@ -4,6 +4,7 @@ import type {
 	Notification as ElectronNotification,
 } from "electron";
 import { Notification } from "electron";
+import { setBadgeCount } from "main/lib/dock-icon";
 import {
 	type AgentLifecycleEvent,
 	type NotificationIds,
@@ -119,6 +120,13 @@ export const createNotificationsRouter = (
 				});
 
 				notification.show();
+				return { success: true as const };
+			}),
+
+		setDockBadge: publicProcedure
+			.input(z.object({ count: z.number().int().min(0) }))
+			.mutation(({ input }) => {
+				setBadgeCount(input.count);
 				return { success: true as const };
 			}),
 
