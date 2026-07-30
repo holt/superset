@@ -198,7 +198,7 @@ export function V2PresetsBar({
 			style={{ scrollbarWidth: "none" }}
 		>
 			<DropdownMenu>
-				<Tooltip>
+				<Tooltip delayDuration={1000}>
 					<TooltipTrigger asChild>
 						<DropdownMenuTrigger asChild>
 							<Button
@@ -210,9 +210,7 @@ export function V2PresetsBar({
 							</Button>
 						</DropdownMenuTrigger>
 					</TooltipTrigger>
-					<TooltipContent side="bottom" sideOffset={4}>
-						Manage Presets
-					</TooltipContent>
+					<TooltipContent side="bottom">Manage Presets</TooltipContent>
 				</Tooltip>
 				<DropdownMenuContent align="end" className="w-56">
 					{matchedPresets.map((preset) => {
