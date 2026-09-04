@@ -1,7 +1,7 @@
 "use client";
 
+import { Trans, useLingui } from "@lingui/react/macro";
 import { authClient } from "@superset/auth/client";
-import type { RouterOutputs } from "@superset/trpc";
 import { Avatar, AvatarFallback, AvatarImage } from "@superset/ui/avatar";
 import { Button } from "@superset/ui/button";
 import {
@@ -43,12 +43,22 @@ import {
 import { env } from "@/env";
 import { useTRPC } from "@/trpc/react";
 
+/** Everything the footer renders. The session already carries all of it, so
+ *  the dashboard layout no longer blocks its shell on a `user.me` round trip
+ *  to the api deployment just to fill in a name and an avatar. */
+export interface SidebarUser {
+	name: string;
+	email: string;
+	image?: string | null;
+}
+
 export interface NavUserProps {
-	user: NonNullable<RouterOutputs["user"]["me"]>;
+	user: SidebarUser;
 }
 
 export function NavUser({ user }: NavUserProps) {
 	const { isMobile } = useSidebar();
+	const { t } = useLingui();
 	const trpc = useTRPC();
 
 	const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
@@ -57,12 +67,16 @@ export function NavUser({ user }: NavUserProps) {
 	const setPasswordMutation = useMutation(
 		trpc.admin.setMyPassword.mutationOptions({
 			onSuccess: () => {
-				toast.success("Password set");
+				toast.success(t({ message: "Password set" }));
 				setPasswordDialogOpen(false);
 				setNewPassword("");
 			},
 			onError: (error) => {
-				toast.error(`Failed to set password: ${error.message}`);
+				toast.error(
+					t({
+						message: `Failed to set password: ${error.message}`,
+					}),
+				);
 			},
 		}),
 	);
@@ -133,25 +147,25 @@ export function NavUser({ user }: NavUserProps) {
 						<DropdownMenuGroup>
 							<DropdownMenuItem>
 								<LuBadgeCheck />
-								Account
+								<Trans>Account</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem onClick={() => setPasswordDialogOpen(true)}>
 								<LuKeyRound />
-								Set password
+								<Trans>Set password</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem>
 								<LuSettings />
-								Settings
+								<Trans>Settings</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem>
 								<LuBell />
-								Notifications
+								<Trans>Notifications</Trans>
 							</DropdownMenuItem>
 						</DropdownMenuGroup>
 						<DropdownMenuSeparator />
 						<DropdownMenuItem onClick={handleSignOut}>
 							<LuLogOut />
-							Log out
+							<Trans>Log out</Trans>
 						</DropdownMenuItem>
 					</DropdownMenuContent>
 				</DropdownMenu>
@@ -165,17 +179,23 @@ export function NavUser({ user }: NavUserProps) {
 				>
 					<DialogContent>
 						<DialogHeader>
-							<DialogTitle>Set password</DialogTitle>
+							<DialogTitle>
+								<Trans>Set password</Trans>
+							</DialogTitle>
 							<DialogDescription>
-								Sets an email+password credential for{" "}
-								<strong>{user.email}</strong> via Better Auth (hashed with
-								scrypt). Existing sign-in methods keep working.
+								<Trans>
+									Sets an email+password credential for{" "}
+									<strong>{user.email}</strong> via Better Auth (hashed with
+									scrypt). Existing sign-in methods keep working.
+								</Trans>
 							</DialogDescription>
 						</DialogHeader>
 						<Input
 							type="password"
 							autoComplete="new-password"
-							placeholder="New password (min 8 characters)"
+							placeholder={t({
+								message: "New password (min 8 characters)",
+							})}
 							value={newPassword}
 							onChange={(event) => setNewPassword(event.target.value)}
 							onKeyDown={(event) => {
@@ -192,7 +212,7 @@ export function NavUser({ user }: NavUserProps) {
 								{setPasswordMutation.isPending ? (
 									<LuLoaderCircle className="mr-2 h-4 w-4 animate-spin" />
 								) : null}
-								Set Password
+								<Trans>Set Password</Trans>
 							</Button>
 						</DialogFooter>
 					</DialogContent>

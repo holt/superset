@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@superset/ui/tabs";
 import { cn } from "@superset/ui/utils";
@@ -25,7 +26,14 @@ import { RunInWorkspacePopoverV2 } from "./components/RunInWorkspacePopoverV2";
 import { RunIssuesInWorkspacePopover } from "./components/RunIssuesInWorkspacePopover";
 import { StatusFilter } from "./components/StatusFilter";
 
-export type TabValue = "all" | "active" | "backlog";
+export type TabValue =
+	| "all"
+	| "active"
+	| "backlog"
+	| "unstarted"
+	| "started"
+	| "completed"
+	| "canceled";
 export type TaskSource = "tasks" | "issues";
 
 interface TasksTopBarProps {
@@ -43,8 +51,8 @@ interface TasksTopBarProps {
 	onViewModeChange: (mode: ViewMode) => void;
 	taskSource: TaskSource;
 	onTaskSourceChange: (taskSource: TaskSource) => void;
-	projectFilter: string | null;
-	onProjectFilterChange: (projectId: string) => void;
+	projectFilters: string[];
+	onProjectFiltersChange: (projectIds: string[]) => void;
 	linearProjectFilter: string | null;
 	onLinearProjectFilterChange: (projectId: string | null) => void;
 	includeClosedIssues: boolean;
@@ -52,8 +60,8 @@ interface TasksTopBarProps {
 }
 
 const TASK_SOURCES = [
-	{ value: "tasks" as const, label: "Linear", Icon: SiLinear },
-	{ value: "issues" as const, label: "GitHub issues", Icon: GoIssueOpened },
+	{ value: "tasks" as const, Icon: SiLinear },
+	{ value: "issues" as const, Icon: GoIssueOpened },
 ] as const;
 
 export function TasksTopBar({
@@ -71,18 +79,34 @@ export function TasksTopBar({
 	onViewModeChange,
 	taskSource,
 	onTaskSourceChange,
-	projectFilter,
-	onProjectFilterChange,
+	projectFilters,
+	onProjectFiltersChange,
 	linearProjectFilter,
 	onLinearProjectFilterChange,
 	includeClosedIssues,
 	onIncludeClosedIssuesChange,
 }: TasksTopBarProps) {
+	const { t } = useLingui();
+	const taskSourceLabels: Record<TaskSource, string> = {
+		tasks: t({
+			message: "Linear",
+		}),
+		issues: t({
+			message: "GitHub issues",
+		}),
+	};
 	const showTaskOnlyControls = taskSource === "tasks";
 	const showIssues = taskSource === "issues";
 	const taskSelectedCount = selectedTasks.length;
 	const issueSelectedCount = selectedIssues.length;
 	const selectedCount = showIssues ? issueSelectedCount : taskSelectedCount;
+	const selectedIssueProjectIds = new Set(
+		selectedIssues.map((issue) => issue.projectId),
+	);
+	const selectedIssueProject =
+		selectedIssueProjectIds.size === 1
+			? (selectedIssueProjectIds.values().next().value ?? null)
+			: null;
 	const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
 	const isV2CloudEnabled = useIsV2CloudEnabled();
 
@@ -104,18 +128,20 @@ export function TasksTopBar({
 									onClick={
 										showIssues ? onClearIssueSelection : onClearSelection
 									}
-									aria-label="Clear selection"
+									aria-label={t({
+										message: "Clear selection",
+									})}
 								>
 									<HiXMark />
 								</Button>
 								<span className="text-sm font-medium">
-									{selectedCount} selected
+									<Trans>{selectedCount} selected</Trans>
 								</span>
 								<div className="h-4 w-px shrink-0 bg-border" />
 								{showIssues ? (
 									<RunIssuesInWorkspacePopover
 										issues={selectedIssues}
-										projectFilter={projectFilter}
+										projectFilter={selectedIssueProject}
 										onComplete={onClearIssueSelection ?? (() => {})}
 									/>
 								) : isV2CloudEnabled ? (
@@ -149,7 +175,7 @@ export function TasksTopBar({
 													className="h-7 rounded-sm px-2 text-xs shadow-none data-[state=active]:shadow-none"
 												>
 													<Icon className="size-3.5" />
-													<span>{source.label}</span>
+													<span>{taskSourceLabels[source.value]}</span>
 												</TabsTrigger>
 											);
 										})}
@@ -176,11 +202,11 @@ export function TasksTopBar({
 									<>
 										<div className="flex items-center gap-2">
 											<span className="text-xs text-muted-foreground">
-												Repository
+												<Trans>Repository</Trans>
 											</span>
 											<ProjectFilter
-												value={projectFilter}
-												onChange={onProjectFilterChange}
+												value={projectFilters}
+												onChange={onProjectFiltersChange}
 											/>
 										</div>
 										<div className="h-4 w-px shrink-0 bg-border" />
@@ -207,17 +233,25 @@ export function TasksTopBar({
 									onClick={() => setIsCreateTaskOpen(true)}
 								>
 									<HiOutlinePencilSquare className="size-4" />
-									<span className="hidden @4xl:inline">New task</span>
+									<span className="hidden @4xl:inline">
+										<Trans>New task</Trans>
+									</span>
 								</Button>
 
 								<fieldset
 									className="flex items-center rounded-md border bg-muted/30 p-0.5"
-									aria-label="Task layout"
+									aria-label={t({
+										message: "Task layout",
+									})}
 								>
 									<button
 										type="button"
-										title="Table view"
-										aria-label="Table view"
+										title={t({
+											message: "Table view",
+										})}
+										aria-label={t({
+											message: "Table view",
+										})}
 										aria-pressed={viewMode === "table"}
 										className={cn(
 											"flex size-6 items-center justify-center rounded-sm transition-colors",
@@ -231,8 +265,12 @@ export function TasksTopBar({
 									</button>
 									<button
 										type="button"
-										title="Board view"
-										aria-label="Board view"
+										title={t({
+											message: "Board view",
+										})}
+										aria-label={t({
+											message: "Board view",
+										})}
 										aria-pressed={viewMode === "board"}
 										className={cn(
 											"flex size-6 items-center justify-center rounded-sm transition-colors",
@@ -252,9 +290,23 @@ export function TasksTopBar({
 							value={searchQuery}
 							onChange={onSearchChange}
 							placeholder={
-								showIssues ? "Search GitHub issues…" : "Search tasks…"
+								showIssues
+									? t({
+											message: "Search GitHub issues…",
+										})
+									: t({
+											message: "Search tasks…",
+										})
 							}
-							label={showIssues ? "Search GitHub issues" : "Search tasks"}
+							label={
+								showIssues
+									? t({
+											message: "Search GitHub issues",
+										})
+									: t({
+											message: "Search tasks",
+										})
+							}
 						/>
 					</div>
 				</div>

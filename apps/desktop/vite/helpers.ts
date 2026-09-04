@@ -1,5 +1,6 @@
 import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, normalize, resolve } from "node:path";
+import { transformAsync } from "@babel/core";
 import type { Plugin } from "vite";
 
 import { main, resources } from "../package.json";
@@ -45,7 +46,11 @@ const RESOURCES_TO_COPY = [
 		dest: resolve(__dirname, "..", devPath, "resources/host-migrations"),
 	},
 	{
-		src: resolve(__dirname, "../src/main/lib/agent-setup/templates"),
+		src: resolve(__dirname, "../../../packages/chat-runtime/src/db/drizzle"),
+		dest: resolve(__dirname, "..", devPath, "resources/chat-migrations"),
+	},
+	{
+		src: resolve(__dirname, "../../../packages/agent-setup/templates"),
 		dest: resolve(__dirname, "..", devPath, "main/templates"),
 	},
 	// Must come after the templates copy above: copyDir wipes its dest, and
@@ -76,6 +81,28 @@ export function copyResourcesPlugin(): Plugin {
 /**
  * Injects environment variables into index.html CSP.
  */
+// The renderer gets the Lingui macro through @vitejs/plugin-react's babel
+// option; the main process has no babel step, so run the macro directly.
+export function linguiMacroPlugin(): Plugin {
+	return {
+		name: "lingui-macro",
+		enforce: "pre",
+		async transform(code, id) {
+			if (!/\.tsx?$/.test(id) || id.includes("/node_modules/")) return null;
+			if (!code.includes("@lingui/core/macro")) return null;
+			const result = await transformAsync(code, {
+				filename: id,
+				babelrc: false,
+				configFile: false,
+				sourceMaps: true,
+				parserOpts: { plugins: ["typescript"] },
+				plugins: ["@lingui/babel-plugin-lingui-macro"],
+			});
+			return result?.code ? { code: result.code, map: result.map } : null;
+		},
+	};
+}
+
 export function htmlEnvTransformPlugin(): Plugin {
 	return {
 		name: "html-env-transform",
@@ -84,13 +111,6 @@ export function htmlEnvTransformPlugin(): Plugin {
 				.replace(
 					/%NEXT_PUBLIC_API_URL%/g,
 					process.env.NEXT_PUBLIC_API_URL || "https://api.superset.sh",
-				)
-				.replace(
-					/%NEXT_PUBLIC_ELECTRIC_URL%/g,
-					new URL(
-						process.env.NEXT_PUBLIC_ELECTRIC_URL ||
-							"https://electric-proxy.avi-6ac.workers.dev",
-					).origin,
 				)
 				.replace(
 					/%NEXT_PUBLIC_STREAMS_URL%/g,

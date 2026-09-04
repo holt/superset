@@ -1,25 +1,60 @@
 import type { SelectV2Workspace } from "@superset/db/schema";
 import { buildHostRoutingKey } from "@superset/shared/host-routing";
-import type { WorkspaceSnapshotPayload } from "@superset/workspace-client";
-import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
+import type {
+	HostConnectionState,
+	WorkspaceSnapshotPayload,
+} from "@superset/workspace-client";
+import { get as idbGet, set as idbSet } from "idb-keyval";
+
+/**
+ * The frozen cloud row shape, widened for host-only capabilities the cloud
+ * schema never learned: project-less "session" workspaces (null projectId,
+ * type "session").
+ */
+export type HostShapedWorkspace = Omit<
+	SelectV2Workspace,
+	"projectId" | "type"
+> & {
+	/** Null for project-less "session" workspaces. */
+	projectId: string | null;
+	type: "main" | "worktree" | "session";
+	/**
+	 * Normalized, sorted tag set. Optional because a row served by an older
+	 * host — or restored from a pre-tags IndexedDB snapshot — carries the
+	 * field ABSENT; consumers must guard with `== null` / `?? []`.
+	 */
+	tags?: string[];
+	/**
+	 * Epoch ms of the newest agent lifecycle event, stamped by the host (it
+	 * never moves on metadata writes, unlike `updatedAt`). Optional for the
+	 * same reason as `tags`; null when the host predates the column. Merged
+	 * items (`HostWorkspaceItem`) always carry it, normalized to null.
+	 */
+	lastActivityAt?: number | null;
+};
 
 /**
  * A workspace row as served by a host (`workspace.list`) — the cloud row
  * shape plus the host-only extras.
  */
-export interface HostWorkspaceRow extends SelectV2Workspace {
+export interface HostWorkspaceRow extends HostShapedWorkspace {
 	worktreePath: string;
 	worktreeExists: boolean;
+	/** Non-null = archived tombstone (only served on `includeArchived`). */
+	archivedAt?: number | null;
+	archiveReason?: "merged" | "deleted" | null;
 }
 
 /** Merged item returned by useHostWorkspaces. */
-export interface HostWorkspaceItem extends SelectV2Workspace {
+export interface HostWorkspaceItem extends HostShapedWorkspace {
 	worktreePath?: string;
 	worktreeExists?: boolean;
-	/** False when the row came from a snapshot/cloud and the host didn't answer. */
+	lastActivityAt: number | null;
+	/** False when the host didn't answer. */
 	hostReachable: boolean;
-	/** "host" = served by a host (live or last-seen); "cloud" = Electric fallback. */
-	source: "host" | "cloud";
+	/** Non-null = archived tombstone (only present on `includeArchived`). */
+	archivedAt?: number | null;
+	archiveReason?: "merged" | "deleted" | null;
 }
 
 export interface HostWorkspacesQueryTarget {
@@ -28,6 +63,12 @@ export interface HostWorkspacesQueryTarget {
 	/** Null when the host is known but unreachable (offline remote). */
 	hostUrl: string | null;
 	isLocal: boolean;
+	/**
+	 * A cloud workspace's sandbox, addressed by a brokered URL rather than by
+	 * machine identity. Its `machineId` is the cloud workspace's own id — the
+	 * sandbox reports an internal one that means nothing to this client.
+	 */
+	isSandbox?: boolean;
 }
 
 export interface HostRowForTargets {
@@ -53,8 +94,8 @@ export function getHostWorkspacesQueryKey(
 
 /**
  * One target per known host: the local host always (direct URL), remote
- * hosts via relay when online, and a null-URL placeholder when offline so
- * the last-seen snapshot still renders.
+ * hosts via relay when online, and a null-URL placeholder when offline.
+ * Plus, at most, the one sandbox behind the workspace that is open.
  */
 export function deriveHostWorkspacesQueryTargets({
 	activeHostUrl,
@@ -62,6 +103,7 @@ export function deriveHostWorkspacesQueryTargets({
 	machineId,
 	relayUrl,
 	fallbackOrganizationId,
+	openSandbox = null,
 }: {
 	activeHostUrl: string | null;
 	hosts: HostRowForTargets[];
@@ -69,6 +111,12 @@ export function deriveHostWorkspacesQueryTargets({
 	relayUrl: string;
 	/** Org for the synthesized local target — see derivePullRequestQueryTargets. */
 	fallbackOrganizationId?: string | null;
+	/** The open cloud workspace's sandbox — never the whole cloud list, see useHostWorkspacesSource. */
+	openSandbox?: {
+		workspaceId: string;
+		organizationId: string;
+		url: string;
+	} | null;
 }): HostWorkspacesQueryTarget[] {
 	const targets: HostWorkspacesQueryTarget[] = hosts.map((host) => {
 		const isLocal = host.machineId === machineId;
@@ -97,6 +145,16 @@ export function deriveHostWorkspacesQueryTargets({
 			organizationId: hosts[0]?.organizationId ?? fallbackOrganizationId ?? "",
 			hostUrl: activeHostUrl,
 			isLocal: true,
+		});
+	}
+
+	if (openSandbox) {
+		targets.push({
+			machineId: openSandbox.workspaceId,
+			organizationId: openSandbox.organizationId,
+			hostUrl: openSandbox.url,
+			isLocal: false,
+			isSandbox: true,
 		});
 	}
 
@@ -139,12 +197,20 @@ export function saveHostWorkspacesSnapshot(
 	void idbSet(snapshotKey(organizationId, machineId), rows).catch(() => {});
 }
 
-export function clearHostWorkspacesSnapshot(
-	organizationId: string,
-	machineId: string,
-): void {
-	if (!organizationId) return;
-	void idbDel(snapshotKey(organizationId, machineId)).catch(() => {});
+/**
+ * Whether a connection-status transition means the socket came back up after
+ * being down. Events broadcast while down are unrecoverable (the bus has no
+ * replay), so every open after the first is a potential gap and the host's
+ * mirrors must resync. Keyed on "has opened before", not the previous state:
+ * a manual `reconnect()` publishes "connecting" (same as the initial dial)
+ * before reopening, so state pairs can't distinguish retry from boot. The
+ * first open is not a reopen — the queries' first fetch covers it.
+ */
+export function isEventBusReopen(
+	hasOpenedBefore: boolean,
+	next: HostConnectionState,
+): boolean {
+	return next === "open" && hasOpenedBefore;
 }
 
 /**
@@ -178,8 +244,14 @@ export function applyWorkspaceChangedEvent(
 		type: snapshot.type,
 		createdByUserId: snapshot.createdByUserId,
 		taskId: snapshot.taskId,
+		// Runtime-optional despite the payload type: an older host's events
+		// carry no tags — keep the row's last known set rather than wiping it.
+		tags: snapshot.tags ?? existing?.tags,
 		createdAt: new Date(snapshot.createdAt),
 		updatedAt: new Date(snapshot.updatedAt),
+		// Same runtime-optionality as tags: an older host's events omit it, so
+		// keep the row's last known stamp rather than wiping it.
+		lastActivityAt: snapshot.lastActivityAt ?? existing?.lastActivityAt ?? null,
 		worktreePath: snapshot.worktreePath,
 		// A host broadcasting created/updated just acted on the worktree;
 		// keep a known value over assuming.
@@ -192,49 +264,44 @@ export function applyWorkspaceChangedEvent(
 }
 
 /**
- * Merge per-host results (live or last-seen) with the Electric fallback.
- * A host that answered is authoritative for its rows — cloud rows for that
- * host are ignored (a deleted row must not resurrect). Cloud rows only fill
- * in for hosts with no host-served data (pre-R1 builds, no snapshot yet).
- * The fallback is deleted in R3 along with the cloud table.
+ * The one place a served/cached row becomes a consumer-facing item: fields
+ * an older host (or an older snapshot) omits are normalized here so nothing
+ * downstream has to know which host version produced the row.
+ */
+export function toHostWorkspaceItem(
+	row: HostWorkspaceRow,
+	hostReachable: boolean,
+): HostWorkspaceItem {
+	return {
+		...row,
+		lastActivityAt: row.lastActivityAt ?? null,
+		hostReachable,
+	};
+}
+
+/**
+ * Merge per-host results. A host that answered is authoritative for its
+ * rows — a deleted row must not resurrect.
  */
 export function mergeHostWorkspaces({
 	hostResults,
-	cloudRows,
 }: {
 	hostResults: Array<{
 		target: HostWorkspacesQueryTarget;
 		rows: HostWorkspaceRow[] | undefined;
 		reachable: boolean;
 	}>;
-	cloudRows: SelectV2Workspace[];
 }): HostWorkspaceItem[] {
 	const items: HostWorkspaceItem[] = [];
-	const hostsWithData = new Set<string>();
 	const seenIds = new Set<string>();
 
 	for (const result of hostResults) {
 		if (!result.rows) continue;
-		hostsWithData.add(result.target.machineId);
 		for (const row of result.rows) {
 			if (seenIds.has(row.id)) continue;
 			seenIds.add(row.id);
-			items.push({
-				...row,
-				hostReachable: result.reachable,
-				source: "host",
-			});
+			items.push(toHostWorkspaceItem(row, result.reachable));
 		}
-	}
-
-	for (const row of cloudRows) {
-		if (seenIds.has(row.id) || hostsWithData.has(row.hostId)) continue;
-		seenIds.add(row.id);
-		items.push({
-			...row,
-			hostReachable: false,
-			source: "cloud",
-		});
 	}
 
 	return items;

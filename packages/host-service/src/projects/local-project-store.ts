@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import type { HostDb } from "../db";
 import { projects } from "../db/schema";
 import type { EventBus } from "../events";
-import type { ProjectSnapshot } from "../events/types";
+import type { ProjectSnapshot, TagSettingSnapshot } from "../events/types";
 
 export type HostProjectRow = typeof projects.$inferSelect;
 
@@ -12,7 +12,10 @@ export interface ProjectStoreContext {
 	eventBus: EventBus;
 }
 
-export function toProjectSnapshot(row: HostProjectRow): ProjectSnapshot {
+export function toProjectSnapshot(
+	row: HostProjectRow,
+	tagSettings?: TagSettingSnapshot[],
+): ProjectSnapshot {
 	return {
 		id: row.id,
 		// Rows that predate local ownership have an empty name until the
@@ -24,8 +27,10 @@ export function toProjectSnapshot(row: HostProjectRow): ProjectSnapshot {
 		repoUrl: row.repoUrl,
 		worktreeBaseDir: row.worktreeBaseDir,
 		icon: row.icon,
+		color: row.color,
 		createdAt: row.createdAt,
 		updatedAt: row.updatedAt || row.createdAt,
+		...(tagSettings !== undefined ? { tagSettings } : {}),
 	};
 }
 
@@ -40,6 +45,7 @@ export function emitProjectChanged(
 	eventBus: EventBus,
 	eventType: "created" | "updated" | "deleted",
 	rowOrId: HostProjectRow | string,
+	tagSettings?: TagSettingSnapshot[],
 ): void {
 	const deleted = eventType === "deleted";
 	eventBus.broadcastProjectChanged({
@@ -48,7 +54,7 @@ export function emitProjectChanged(
 		project:
 			deleted || typeof rowOrId === "string"
 				? null
-				: toProjectSnapshot(rowOrId),
+				: toProjectSnapshot(rowOrId, tagSettings),
 		occurredAt: Date.now(),
 	});
 }
@@ -56,6 +62,7 @@ export function emitProjectChanged(
 export interface UpdateLocalProjectPatch {
 	name?: string;
 	icon?: string | null;
+	color?: string | null;
 }
 
 /** Patch a local project row, bump `updatedAt`, and broadcast. */

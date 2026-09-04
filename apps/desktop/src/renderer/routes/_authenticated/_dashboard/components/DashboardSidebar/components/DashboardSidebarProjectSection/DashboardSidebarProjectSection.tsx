@@ -81,6 +81,7 @@ export function DashboardSidebarProjectSection({
 	if (isSidebarCollapsed) {
 		return (
 			<DashboardSidebarProjectContextMenu
+				projectId={project.id}
 				onCreateSection={handleNewSection}
 				onImportWorktrees={handleImportWorktrees}
 				onOpenInFinder={handleOpenInFinder}
@@ -93,9 +94,9 @@ export function DashboardSidebarProjectSection({
 						projectId={project.id}
 						projectName={project.name}
 						iconUrl={project.iconUrl}
+						projectColor={project.color}
 						isCollapsed={project.isCollapsed}
 						totalWorkspaceCount={totalWorkspaceCount}
-						projectChildren={project.children}
 						workspaceShortcutLabels={workspaceShortcutLabels}
 						onWorkspaceHover={onWorkspaceHover}
 						onToggleCollapse={() => onToggleCollapse(project.id)}
@@ -109,6 +110,7 @@ export function DashboardSidebarProjectSection({
 	return (
 		<div className="mt-1 first:mt-0">
 			<DashboardSidebarProjectContextMenu
+				projectId={project.id}
 				onCreateSection={handleNewSection}
 				onImportWorktrees={handleImportWorktrees}
 				onOpenInFinder={handleOpenInFinder}
@@ -119,6 +121,7 @@ export function DashboardSidebarProjectSection({
 				<DashboardSidebarProjectRow
 					projectName={project.name}
 					iconUrl={project.iconUrl}
+					projectColor={project.color}
 					isCollapsed={project.isCollapsed}
 					isRenaming={isRenaming}
 					renameValue={renameValue}
@@ -143,9 +146,9 @@ export function DashboardSidebarProjectSection({
 						className="overflow-hidden"
 					>
 						<DashboardSidebarExpandedProjectContent
+							containerId={project.id}
 							projectId={project.id}
 							isCollapsed={project.isCollapsed}
-							projectChildren={project.children}
 							workspaceShortcutLabels={workspaceShortcutLabels}
 							onWorkspaceHover={onWorkspaceHover}
 							onDeleteSection={deleteSection}

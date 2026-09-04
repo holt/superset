@@ -1,5 +1,6 @@
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
+import { buildUpstreamHeaders } from "@superset/shared/host-routing";
 import type { Context, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -9,7 +10,6 @@ import { type AuthContext, verifyJWT } from "./auth";
 import * as directory from "./directory";
 import { env } from "./env";
 import { createProxyBridge, internalProxyUrl, PROXY_HOP_PARAM } from "./proxy";
-import { captureSentryException, initSentry } from "./sentry";
 import { startSyntheticCheck } from "./synthetic";
 import { isTrpcPath, trpcErrorResponse } from "./trpc-error";
 import { TunnelManager } from "./tunnel";
@@ -18,7 +18,7 @@ import { TunnelManager } from "./tunnel";
 // upgrade URL because browser WebSockets can't send custom headers, and
 // Hono's default `logger()` echoes the full query string. Mask the values
 // before they reach the log sink so the raw token doesn't end up in Fly
-// logs / Sentry breadcrumbs.
+// logs.
 const SENSITIVE_QUERY_RE = /([?&])(token)=[^&\s]+/g;
 const redactingLogger = logger((message, ...rest) => {
 	const redacted =
@@ -27,8 +27,6 @@ const redactingLogger = logger((message, ...rest) => {
 			: message;
 	console.log(redacted, ...rest);
 });
-
-initSentry();
 
 process.on("uncaughtException", (err) => {
 	console.error("[relay] uncaughtException (suppressed)", err);
@@ -95,10 +93,7 @@ app.use("*", redactingLogger);
 app.use("*", cors());
 
 app.onError((err, c) => {
-	captureSentryException(err, {
-		op: "hono.onError",
-		path: new URL(c.req.url).pathname,
-	});
+	console.error("[relay] unhandled error", err);
 	return c.json({ error: "Internal server error" }, 500);
 });
 
@@ -123,7 +118,7 @@ async function maybeReplay(hostId: string): Promise<{
 } | null> {
 	if (tunnelManager.hasTunnel(hostId)) return null;
 	const owner = await directory.lookup(hostId).catch((err) => {
-		captureSentryException(err, { op: "directory.lookup", hostId });
+		console.error("[relay] directory.lookup failed", { hostId, err });
 		return null;
 	});
 	if (!owner) return null;
@@ -190,7 +185,7 @@ const authMiddleware: MiddlewareHandler<AppContext> = async (c, next) => {
 			const isProxyHop = c.req.query(PROXY_HOP_PARAM) === "1";
 			if (!isProxyHop) {
 				const owner = await directory.lookup(hostId).catch((err) => {
-					captureSentryException(err, { op: "directory.lookup", hostId });
+					console.error("[relay] directory.lookup failed", { hostId, err });
 					return null;
 				});
 				const ownedElsewhere =
@@ -336,10 +331,7 @@ app.all("/hosts/:hostId/trpc/*", async (c) => {
 	const path = `${url.pathname.slice(prefix.length) || "/"}${url.search}`;
 	const body = (await c.req.text().catch(() => "")) || undefined;
 
-	const headers: Record<string, string> = {};
-	for (const [key, value] of c.req.raw.headers.entries()) {
-		if (key !== "host" && key !== "authorization") headers[key] = value;
-	}
+	const headers = buildUpstreamHeaders(c.req.raw.headers, c.get("auth").sub);
 
 	try {
 		const res = await tunnelManager.sendHttpRequest(hostId, {
@@ -353,7 +345,7 @@ app.all("/hosts/:hostId/trpc/*", async (c) => {
 			headers: res.headers,
 		});
 	} catch (error) {
-		captureSentryException(error, { hostId, path });
+		console.error("[relay] proxy failed", { hostId, path, error });
 		const message = error instanceof Error ? error.message : "Proxy error";
 		return trpcErrorResponse(c, "BAD_GATEWAY", message);
 	}
@@ -408,7 +400,7 @@ app.get(
 
 setInterval(() => {
 	void directory.sweepStale().catch((err) => {
-		captureSentryException(err, { op: "directory.sweepStale" });
+		console.error("[relay] directory.sweepStale failed", err);
 	});
 }, 30_000);
 

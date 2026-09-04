@@ -16,8 +16,9 @@ export interface LoadAddonsResult {
 	dispose: () => void;
 }
 
-// Once WebGL fails, skip it for all subsequent runtimes (VS Code pattern).
-let suggestedRendererType: "webgl" | "dom" | undefined;
+// Truecolor-heavy TUIs mint unbounded glyph variants, growing the WebGL glyph
+// atlas without bound (SUPER-1793); reset it after this many page adds.
+const ATLAS_PAGE_ADDS_BEFORE_RESET = 32;
 
 /**
  * Load optional addons onto an already-opened terminal. Returns a cleanup
@@ -68,20 +69,50 @@ export function loadAddons(
 	};
 	setLigaturesEnabled(options.ligatures);
 
+	// Every terminal attempts WebGL on its own. A failure here degrades THIS
+	// terminal to xterm's DOM renderer, which costs 1.2x (a TUI redrawing a few
+	// dirty rows) to 13.7x (bulk scrolling output) more renderer CPU — so it
+	// must never be latched for the session.
+	// Losses are routinely transient (a driver reset after an OS update) or
+	// routine (browsers cap live WebGL contexts, so opening enough terminals
+	// evicts the oldest), and latching turned either into a permanently
+	// degraded session recoverable only by restarting the app (GH #6822).
 	const rafId = requestAnimationFrame(() => {
-		if (disposed || suggestedRendererType === "dom") return;
+		if (disposed) return;
 
 		try {
 			webglAddon = new WebglAddon();
 			webglAddon.onContextLoss(() => {
 				webglAddon?.dispose();
 				webglAddon = null;
-				suggestedRendererType = "dom";
+				console.warn(
+					"[terminal] WebGL context lost — this terminal falls back to the DOM renderer",
+				);
 				terminal.refresh(0, terminal.rows - 1);
 			});
+			// Subscribe before loadAddon: the first page-add fires during activation.
+			let atlasPageAdds = 0;
+			webglAddon.onAddTextureAtlasCanvas(() => {
+				if (++atlasPageAdds >= ATLAS_PAGE_ADDS_BEFORE_RESET) {
+					atlasPageAdds = 0;
+					// Defer: the event fires mid-glyph-draw; clearing synchronously
+					// would wipe the atlas under the in-flight rasterization.
+					queueMicrotask(() => webglAddon?.clearTextureAtlas());
+				}
+			});
 			terminal.loadAddon(webglAddon);
-		} catch {
-			suggestedRendererType = "dom";
+		} catch (err) {
+			console.warn(
+				"[terminal] WebGL renderer unavailable — this terminal falls back to the DOM renderer",
+				err,
+			);
+			// xterm's AddonManager pushes the addon and wraps its dispose
+			// BEFORE calling activate(), and does not roll back when activate
+			// throws. Dropping the reference alone would strand the instance in
+			// the manager for the terminal's lifetime, so dispose it explicitly.
+			try {
+				webglAddon?.dispose();
+			} catch {}
 			webglAddon = null;
 		}
 	});

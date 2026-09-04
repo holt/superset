@@ -1,4 +1,10 @@
 import {
+	setupSingleAgent,
+	teardownSingleAgent,
+	writeSharedDisabledAgentIds,
+} from "@superset/agent-setup";
+import { isSupportedLocale } from "@superset/i18n/locales";
+import {
 	type AgentCustomDefinition,
 	type AgentPresetOverrideEnvelope,
 	BRANCH_PREFIX_MODES,
@@ -32,13 +38,14 @@ import {
 	resolveAgentConfigs,
 	upsertCustomAgentDefinition,
 } from "@superset/shared/agent-settings";
+import { NOTIFICATION_VOLUME_LIMITS } from "@superset/shared/settings-constraints";
 import { TRPCError } from "@trpc/server";
 import { app } from "electron";
 import { env } from "main/env.main";
 import { exitImmediately } from "main/index";
-import { setupSingleAgent } from "main/lib/agent-setup";
 import { hasCustomRingtone } from "main/lib/custom-ringtones";
 import { getHostServiceCoordinator } from "main/lib/host-service-coordinator";
+import { applyAppLanguage } from "main/lib/language";
 import { localDb } from "main/lib/local-db";
 import {
 	DEFAULT_AUTO_APPLY_DEFAULT_PRESET,
@@ -48,6 +55,7 @@ import {
 	DEFAULT_OPEN_LINKS_IN_APP,
 	DEFAULT_SHOW_PRESETS_BAR,
 	DEFAULT_SHOW_RESOURCE_MONITOR,
+	DEFAULT_TERMINAL_COPY_ON_SELECT,
 	DEFAULT_TERMINAL_LINK_BEHAVIOR,
 	DEFAULT_TERMINAL_PARKED_RUNTIME_CAP,
 	DEFAULT_USE_COMPACT_TERMINAL_ADD_BUTTON,
@@ -56,6 +64,7 @@ import {
 	MIN_TERMINAL_PARKED_RUNTIME_CAP,
 } from "shared/constants";
 import { normalizePresetProjectIds } from "shared/preset-project-targeting";
+import { getPresetsForTriggerField } from "shared/preset-trigger-selection";
 import {
 	CUSTOM_RINGTONE_ID,
 	DEFAULT_RINGTONE_ID,
@@ -74,6 +83,10 @@ import {
 	updateCustomAgentInputSchema,
 } from "./agent-preset-router.utils";
 import {
+	clearImportedCliTerminalScripts,
+	isPendingCliTerminalScript,
+} from "./cli-terminal-script-import";
+import {
 	setFontSettingsSchema,
 	transformFontSettings,
 } from "./font-settings.utils";
@@ -82,7 +95,6 @@ import {
 	type PresetWithUnknownMode,
 	shouldPersistNormalizedTerminalPresets,
 } from "./preset-execution-mode";
-import { getPresetsForTriggerField } from "./preset-trigger-selection";
 
 function isValidRingtoneId(ringtoneId: string): boolean {
 	if (isBuiltInRingtoneId(ringtoneId)) {
@@ -273,6 +285,36 @@ export const createSettingsRouter = () => {
 			}
 			return getNormalizedTerminalPresets();
 		}),
+		getPendingCliTerminalScripts: publicProcedure
+			.input(z.object({ organizationId: z.string().min(1) }))
+			.query(({ input }) =>
+				getNormalizedTerminalPresets().filter((script) =>
+					isPendingCliTerminalScript(script, input.organizationId),
+				),
+			),
+		acknowledgeCliTerminalScripts: publicProcedure
+			.input(
+				z.object({
+					organizationId: z.string().min(1),
+					ids: z.array(z.string()).min(1),
+				}),
+			)
+			.mutation(({ input }) =>
+				// Immediate transaction: a concurrent `superset scripts add` must not
+				// land between this read and write or its row would be dropped.
+				localDb.transaction(
+					() => {
+						const result = clearImportedCliTerminalScripts({
+							scripts: getNormalizedTerminalPresets(),
+							organizationId: input.organizationId,
+							ids: input.ids,
+						});
+						if (result.changed) saveTerminalPresets(result.scripts);
+						return { acknowledged: result.changed };
+					},
+					{ behavior: "immediate" },
+				),
+			),
 		getAgentPresets: publicProcedure.query(() => getResolvedAgentPresets()),
 		createCustomAgent: publicProcedure
 			.input(createCustomAgentInputSchema)
@@ -373,7 +415,6 @@ export const createSettingsRouter = () => {
 				}
 
 				const normalizedPatch = normalizeAgentPresetPatch({
-					definition,
 					patch: input.patch,
 				});
 				const nextOverrides = createOverrideEnvelopeWithPatch({
@@ -455,7 +496,7 @@ export const createSettingsRouter = () => {
 				if (!preset) {
 					throw new TRPCError({
 						code: "NOT_FOUND",
-						message: `Terminal preset ${input.id} not found`,
+						message: `Terminal script ${input.id} not found`,
 					});
 				}
 
@@ -574,6 +615,40 @@ export const createSettingsRouter = () => {
 			.query(({ input }) =>
 				getPresetsForTrigger("applyOnNewTab", input?.projectId ?? null),
 			),
+
+		// App display language: "auto"/null = follow the system language.
+		getLanguage: publicProcedure.query(() => {
+			const row = getSettings();
+			const stored = row.language;
+			return stored && isSupportedLocale(stored) ? stored : null;
+		}),
+
+		setLanguage: publicProcedure
+			.input(z.object({ language: z.string().nullable() }))
+			.mutation(async ({ input }) => {
+				const value =
+					input.language === null || input.language === "auto"
+						? null
+						: input.language;
+				if (value !== null && !isSupportedLocale(value)) {
+					throw new TRPCError({
+						code: "BAD_REQUEST",
+						message: `Unsupported language: ${value}`,
+					});
+				}
+				localDb
+					.insert(settings)
+					.values({ id: 1, language: value })
+					.onConflictDoUpdate({
+						target: settings.id,
+						set: { language: value },
+					})
+					.run();
+				// The application and tray menus resolve their labels when they are
+				// built, so they need an explicit rebuild on a language change.
+				// Awaited: the catalog for the new locale loads on demand.
+				await applyAppLanguage(value);
+			}),
 
 		getSelectedRingtoneId: publicProcedure.query(() => {
 			const row = getSettings();
@@ -899,7 +974,14 @@ export const createSettingsRouter = () => {
 		}),
 
 		setNotificationVolume: publicProcedure
-			.input(z.object({ volume: z.number().min(0).max(100) }))
+			.input(
+				z.object({
+					volume: z
+						.number()
+						.min(NOTIFICATION_VOLUME_LIMITS.min)
+						.max(NOTIFICATION_VOLUME_LIMITS.max),
+				}),
+			)
 			.mutation(({ input }) => {
 				localDb
 					.insert(settings)
@@ -985,6 +1067,26 @@ export const createSettingsRouter = () => {
 				return { success: true };
 			}),
 
+		getTerminalCopyOnSelect: publicProcedure.query(() => {
+			const row = getSettings();
+			return row.terminalCopyOnSelect ?? DEFAULT_TERMINAL_COPY_ON_SELECT;
+		}),
+
+		setTerminalCopyOnSelect: publicProcedure
+			.input(z.object({ enabled: z.boolean() }))
+			.mutation(({ input }) => {
+				localDb
+					.insert(settings)
+					.values({ id: 1, terminalCopyOnSelect: input.enabled })
+					.onConflictDoUpdate({
+						target: settings.id,
+						set: { terminalCopyOnSelect: input.enabled },
+					})
+					.run();
+
+				return { success: true };
+			}),
+
 		getShowResourceMonitor: publicProcedure.query(() => {
 			const row = getSettings();
 			return row.showResourceMonitor ?? DEFAULT_SHOW_RESOURCE_MONITOR;
@@ -1045,6 +1147,28 @@ export const createSettingsRouter = () => {
 				return { success: true };
 			}),
 
+		getBrowserHomepageUrl: publicProcedure.query(() => {
+			const row = getSettings();
+			return row.browserHomepageUrl ?? null;
+		}),
+
+		setBrowserHomepageUrl: publicProcedure
+			.input(z.object({ url: z.string().trim().nullable() }))
+			.mutation(({ input }) => {
+				// An empty string clears the override; the pane falls back to about:blank.
+				const url = input.url && input.url.length > 0 ? input.url : null;
+				localDb
+					.insert(settings)
+					.values({ id: 1, browserHomepageUrl: url })
+					.onConflictDoUpdate({
+						target: settings.id,
+						set: { browserHomepageUrl: url },
+					})
+					.run();
+
+				return { success: true };
+			}),
+
 		getDefaultEditor: publicProcedure.query(() => {
 			const row = getSettings();
 			return row.defaultEditor ?? null;
@@ -1077,11 +1201,62 @@ export const createSettingsRouter = () => {
 		/**
 		 * Re-runs wrapper/settings/hook setup for one agent. Safety net for
 		 * the settings-UI Add flow; returns `{ ran: false }` for unknown ids.
+		 * Adding an agent expresses intent to integrate it, so a previously
+		 * disabled hooks toggle is cleared first.
 		 */
 		setupAgent: publicProcedure
 			.input(z.object({ agentId: z.string().min(1) }))
 			.mutation(({ input }) => {
+				const disabled = getSettings().disabledAgentHooks ?? [];
+				if (disabled.includes(input.agentId)) {
+					const next = disabled.filter((id) => id !== input.agentId);
+					localDb
+						.insert(settings)
+						.values({ id: 1, disabledAgentHooks: next })
+						.onConflictDoUpdate({
+							target: settings.id,
+							set: { disabledAgentHooks: next },
+						})
+						.run();
+					writeSharedDisabledAgentIds(next);
+				}
 				const ran = setupSingleAgent(input.agentId);
+				return { ran };
+			}),
+
+		getAgentHooksDisabled: publicProcedure.query(() => {
+			return getSettings().disabledAgentHooks ?? [];
+		}),
+
+		/**
+		 * Toggles Superset's hook integration for one agent. Disabling removes
+		 * the managed entries from the agent's global config immediately;
+		 * startup re-applies the choice so it survives older app versions
+		 * re-adding them.
+		 */
+		setAgentHooksEnabled: publicProcedure
+			.input(z.object({ agentId: z.string().min(1), enabled: z.boolean() }))
+			.mutation(({ input }) => {
+				const current = new Set(getSettings().disabledAgentHooks ?? []);
+				if (input.enabled) {
+					current.delete(input.agentId);
+				} else {
+					current.add(input.agentId);
+				}
+				const next = [...current];
+				localDb
+					.insert(settings)
+					.values({ id: 1, disabledAgentHooks: next })
+					.onConflictDoUpdate({
+						target: settings.id,
+						set: { disabledAgentHooks: next },
+					})
+					.run();
+				writeSharedDisabledAgentIds(next);
+
+				const ran = input.enabled
+					? setupSingleAgent(input.agentId)
+					: teardownSingleAgent(input.agentId);
 				return { ran };
 			}),
 

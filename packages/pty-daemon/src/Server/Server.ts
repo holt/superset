@@ -33,10 +33,18 @@ import {
 export interface ServerOptions {
 	socketPath: string;
 	daemonVersion: string;
+	/** macOS trustd reachability, probed once at daemon startup; see main.ts. */
+	trustdHealthy?: boolean;
 	bufferCap?: number;
 	outboundBufferCap?: number;
 	/** Pause producing PTYs when a subscriber buffers past this (flow control). */
 	outboundPauseThreshold?: number;
+	/**
+	 * Disconnect a subscriber that stays congested (never drains) this long.
+	 * A pause holds the PTY for every subscriber, so one dead reader would
+	 * otherwise freeze the terminal for everyone.
+	 */
+	pausedConnTimeoutMs?: number;
 	/**
 	 * Override for the PTY-spawn factory. Production leaves this unset;
 	 * `defaultSpawn` (real node-pty) is used. Tests inject a fake here so
@@ -55,12 +63,23 @@ const DEFAULT_OUTBOUND_BUFFER_CAP_BYTES = 8 * 1024 * 1024;
 // instead of renderer ACKs). Resume on socket 'drain'.
 const DEFAULT_OUTBOUND_PAUSE_THRESHOLD_BYTES = 1 * 1024 * 1024;
 
+// A pause is only bounded by the subscriber draining or closing. A host-service
+// that is alive but wedged (its exit hung on a stuck worker after an app
+// update) keeps its socket open and never reads, so its pause held every
+// terminal frozen for the live host-service too, and the destroy cap above was
+// never reached because a paused PTY produces nothing. Bound the pause: a
+// subscriber still congested after this long is dropped, which resumes the
+// PTYs for everyone else.
+const DEFAULT_PAUSED_CONN_TIMEOUT_MS = 30_000;
+
 interface ConnState extends Conn {
 	socket: net.Socket;
 	decoder: FrameDecoder;
 	negotiated: number | null;
 	/** Session ids whose PTYs we paused because this conn was congested. */
 	pausedSessions: Set<string>;
+	/** Armed while this conn holds PTYs paused; fires to disconnect it. */
+	pauseTimer: NodeJS.Timeout | null;
 }
 
 export class Server {
@@ -68,11 +87,24 @@ export class Server {
 	private readonly store: SessionStore;
 	private readonly conns = new Set<ConnState>();
 	private readonly opts: ServerOptions;
+	/**
+	 * macOS trustd reachability, surfaced in the hello-ack. Mutable so the
+	 * probe can run AFTER the socket binds / handoff-ack is sent rather than
+	 * delaying either — see main.ts. Until set, hello-ack omits it and the
+	 * supervisor treats that as "unknown" (no respawn).
+	 */
+	private trustdHealthy: boolean | undefined;
 
 	constructor(opts: ServerOptions) {
 		this.opts = opts;
+		this.trustdHealthy = opts.trustdHealthy;
 		this.store = new SessionStore({ bufferCap: opts.bufferCap });
 		this.server = net.createServer((socket) => this.onConnection(socket));
+	}
+
+	/** Update the trustd-health value reported in subsequent hello-acks. */
+	setTrustdHealthy(healthy: boolean): void {
+		this.trustdHealthy = healthy;
 	}
 
 	async listen(): Promise<void> {
@@ -255,6 +287,10 @@ export class Server {
 					"--handoff",
 					`--snapshot=${snapshotPath}`,
 					`--socket=${this.opts.socketPath}`,
+					// Without this the successor falls back to the store's own
+					// default and a session's replay history silently shrinks on
+					// every daemon update.
+					`--buffer-bytes=${this.store.bufferCapBytes}`,
 				],
 				{
 					stdio,
@@ -363,6 +399,7 @@ export class Server {
 			negotiated: null,
 			subscriptions: new Set(),
 			pausedSessions: new Set(),
+			pauseTimer: null,
 			send: (msg, payload) =>
 				writeMessage(socket, msg, payload, outboundBufferCap),
 		};
@@ -424,6 +461,7 @@ export class Server {
 				protocol: negotiated,
 				daemonVersion: this.opts.daemonVersion,
 				daemonPid: process.pid,
+				trustdHealthy: this.trustdHealthy,
 			});
 			return;
 		}
@@ -523,6 +561,7 @@ export class Server {
 				c.send(out, chunk);
 				if (!c.socket.destroyed && c.socket.writableLength > pauseThreshold) {
 					c.pausedSessions.add(session.id);
+					this.armPauseTimer(c);
 					congested = true;
 				}
 			}
@@ -555,6 +594,9 @@ export class Server {
 					c.subscriptions.delete(session.id);
 				}
 				c.pausedSessions.delete(session.id);
+				// This conn holds nothing paused now; a later congestion episode
+				// must get a fresh deadline, not the remainder of this one.
+				if (c.pausedSessions.size === 0) this.clearPauseTimer(c);
 			}
 			// Delete the session immediately. Without this, every closed
 			// terminal pane left a row in the store forever — list-reply
@@ -577,10 +619,39 @@ export class Server {
 	}
 
 	/**
+	 * Start the clock on a congestion episode. One timer per conn: it is
+	 * cleared when the conn drains or drops, and a later episode re-arms it.
+	 */
+	private armPauseTimer(conn: ConnState): void {
+		if (conn.pauseTimer) return;
+		const timeoutMs =
+			this.opts.pausedConnTimeoutMs ?? DEFAULT_PAUSED_CONN_TIMEOUT_MS;
+		conn.pauseTimer = setTimeout(() => {
+			conn.pauseTimer = null;
+			// Nothing paused any more (the sessions exited) — the conn is not
+			// blocking anyone, so leave it be.
+			if (conn.socket.destroyed || conn.pausedSessions.size === 0) return;
+			process.stderr.write(
+				`[pty-daemon] subscriber stopped reading for ${timeoutMs}ms while holding ${conn.pausedSessions.size} session(s) paused; disconnecting it\n`,
+			);
+			// 'close' -> dropConn resumes the PTYs for the remaining subscribers.
+			conn.socket.destroy();
+		}, timeoutMs);
+		conn.pauseTimer.unref();
+	}
+
+	private clearPauseTimer(conn: ConnState): void {
+		if (!conn.pauseTimer) return;
+		clearTimeout(conn.pauseTimer);
+		conn.pauseTimer = null;
+	}
+
+	/**
 	 * Resume every PTY paused on behalf of `conn`, unless another congested
 	 * conn still holds it paused. Called on socket 'drain' and on conn drop.
 	 */
 	private resumePausedSessions(conn: ConnState): void {
+		this.clearPauseTimer(conn);
 		for (const id of conn.pausedSessions) {
 			conn.pausedSessions.delete(id);
 			let heldElsewhere = false;

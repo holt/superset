@@ -1,10 +1,13 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
+import { workspaceTagsInputSchema } from "@superset/shared/workspace-tags";
 import { TRPCError } from "@trpc/server";
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { projects, workspaces } from "../../../db/schema";
 import {
+	getWorkspaceTags,
+	getWorkspaceTagsByWorkspaceId,
 	toCloudShape,
 	updateLocalWorkspace,
 } from "../../../workspaces/local-workspace-store";
@@ -37,30 +40,54 @@ export const workspaceRouter = router({
 	 * Authoritative list of this host's workspaces, served entirely from
 	 * host.db — works with zero cloud availability. Rows are shaped like
 	 * cloud rows (plus local extras) so consumers of either read path agree.
+	 * Archived (tombstoned) rows are excluded unless the caller opts in —
+	 * only the workspaces board does, for its Merged/Deleted columns.
 	 */
-	list: protectedProcedure.query(({ ctx }) => {
-		const rows = ctx.db.select().from(workspaces).all();
-		const projectNameById = new Map(
-			ctx.db
-				.select({
-					id: projects.id,
-					name: projects.name,
-					repoPath: projects.repoPath,
-				})
-				.from(projects)
-				.all()
-				.map((project) => [
-					project.id,
-					project.name || basename(project.repoPath),
-				]),
-		);
-		return rows.map((row) => ({
-			...toCloudShape(row, ctx.organizationId),
-			worktreePath: row.worktreePath,
-			worktreeExists: existsSync(row.worktreePath),
-			projectName: projectNameById.get(row.projectId) ?? null,
-		}));
-	}),
+	list: protectedProcedure
+		.input(z.object({ includeArchived: z.boolean().default(false) }).optional())
+		.query(({ ctx, input }) => {
+			const rows = input?.includeArchived
+				? ctx.db.select().from(workspaces).all()
+				: ctx.db
+						.select()
+						.from(workspaces)
+						.where(isNull(workspaces.archivedAt))
+						.all();
+			const projectNameById = new Map(
+				ctx.db
+					.select({
+						id: projects.id,
+						name: projects.name,
+						repoPath: projects.repoPath,
+					})
+					.from(projects)
+					.all()
+					.map((project) => [
+						project.id,
+						project.name || basename(project.repoPath),
+					]),
+			);
+			const tagsByWorkspaceId = getWorkspaceTagsByWorkspaceId(
+				ctx.db,
+				rows.map((row) => row.id),
+			);
+			return rows.map((row) => ({
+				...toCloudShape(row, ctx.organizationId),
+				tags: tagsByWorkspaceId.get(row.id) ?? [],
+				worktreePath: row.worktreePath,
+				// Tombstones' worktrees are gone by definition; stat-checking an
+				// unbounded, forever-growing archive on every poll adds up.
+				worktreeExists:
+					row.archivedAt == null ? existsSync(row.worktreePath) : false,
+				projectName: row.projectId
+					? (projectNameById.get(row.projectId) ?? null)
+					: null,
+				// Host-only: the frozen cloud shape never had an activity signal.
+				lastActivityAt: row.lastActivityAt,
+				archivedAt: row.archivedAt,
+				archiveReason: row.archiveReason,
+			}));
+		}),
 
 	/**
 	 * Rename / branch-repoint / task-link update, local-first: the host.db
@@ -75,6 +102,7 @@ export const workspaceRouter = router({
 				name: z.string().min(1).optional(),
 				branch: z.string().min(1).optional(),
 				taskId: z.string().uuid().nullable().optional(),
+				tags: workspaceTagsInputSchema.optional(),
 			}),
 		)
 		.mutation(async ({ ctx, input }) => {
@@ -94,13 +122,21 @@ export const workspaceRouter = router({
 						'The local workspace cannot be renamed — it always displays as "local".',
 				});
 			}
-			const patch: { name?: string; branch?: string; taskId?: string | null } =
-				{};
+			const patch: {
+				name?: string;
+				branch?: string;
+				taskId?: string | null;
+				tags?: string[];
+			} = {};
 			if (input.name !== undefined) patch.name = input.name;
 			if (input.branch !== undefined) patch.branch = input.branch;
 			if (input.taskId !== undefined) patch.taskId = input.taskId;
+			if (input.tags !== undefined) patch.tags = input.tags;
 			if (Object.keys(patch).length === 0) {
-				return toCloudShape(current, ctx.organizationId);
+				return {
+					...toCloudShape(current, ctx.organizationId),
+					tags: getWorkspaceTags(ctx.db, current.id),
+				};
 			}
 			const updated = updateLocalWorkspace(
 				{ db: ctx.db, eventBus: ctx.eventBus },
@@ -113,21 +149,25 @@ export const workspaceRouter = router({
 					message: "Workspace not found",
 				});
 			}
-			return toCloudShape(updated, ctx.organizationId);
+			// Linking a task to a workspace starts work on it — move it to
+			// In Progress. Best-effort cloud call; the update never blocks.
+			if (typeof input.taskId === "string") {
+				const taskId = input.taskId;
+				void ctx.api.task.start.mutate({ id: taskId }).catch((err) => {
+					console.warn(
+						`[workspace.update] failed to mark task ${taskId} as started:`,
+						err,
+					);
+				});
+			}
+			return {
+				...toCloudShape(updated, ctx.organizationId),
+				tags: getWorkspaceTags(ctx.db, updated.id),
+			};
 		}),
 
-	cloudList: protectedProcedure.query(async ({ ctx }) => {
-		const rows = await ctx.api.v2Workspace.list.query({
-			organizationId: ctx.organizationId,
-		});
-		return rows.map((row) => ({
-			id: row.id,
-			projectId: row.projectId,
-			branch: row.branch,
-			hostId: row.hostId,
-		}));
-	}),
-
+	// Workspaces are host-owned now; the cloud list it proxied is gone. Kept as
+	// an empty read so released clients that still call it don't error.
 	gitStatus: protectedProcedure
 		.input(z.object({ id: z.string() }))
 		.query(async ({ ctx, input }) => {

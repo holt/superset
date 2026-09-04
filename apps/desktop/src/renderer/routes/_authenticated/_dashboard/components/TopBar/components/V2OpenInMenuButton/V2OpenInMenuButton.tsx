@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { ExternalApp } from "@superset/local-db";
 import {
 	DropdownMenu,
@@ -23,7 +24,8 @@ import { useThemeStore } from "renderer/stores";
 interface V2OpenInMenuButtonProps {
 	worktreePath: string;
 	branch: string;
-	projectId: string;
+	/** Null for project-less "session" workspaces (no per-project default app). */
+	projectId: string | null;
 }
 
 export function V2OpenInMenuButton({
@@ -31,21 +33,37 @@ export function V2OpenInMenuButton({
 	branch,
 	projectId,
 }: V2OpenInMenuButtonProps) {
+	const { t } = useLingui();
 	const activeTheme = useThemeStore((state) => state.activeTheme);
 
 	const { app: persistedApp, setApp: persistDefaultApp } =
-		useV2ProjectDefaultApp(projectId);
+		useV2ProjectDefaultApp(projectId ?? undefined);
 	const resolvedApp: ExternalApp = persistedApp ?? "finder";
 
 	const openInApp = electronTrpc.external.openInApp.useMutation({
 		onSuccess: (_data, variables) => {
 			persistDefaultApp(variables.app);
 		},
-		onError: (error) => toast.error(`Failed to open: ${error.message}`),
+		onError: (error) =>
+			toast.error(
+				t({
+					message: `Failed to open: ${error.message}`,
+				}),
+			),
 	});
 	const copyPath = electronTrpc.external.copyPath.useMutation({
-		onSuccess: () => toast.success("Path copied to clipboard"),
-		onError: (error) => toast.error(`Failed to copy path: ${error.message}`),
+		onSuccess: () =>
+			toast.success(
+				t({
+					message: "Path copied to clipboard",
+				}),
+			),
+		onError: (error) =>
+			toast.error(
+				t({
+					message: `Failed to copy path: ${error.message}`,
+				}),
+			),
 	});
 
 	const currentApp = useMemo(
@@ -89,14 +107,21 @@ export function V2OpenInMenuButton({
 						disabled={isLoading || !currentApp}
 						aria-label={
 							currentApp
-								? `Open in ${currentApp.displayLabel ?? currentApp.label}`
-								: "Open in editor"
+								? t({
+										message: `Open in ${currentApp.displayLabel ?? currentApp.label}`,
+									})
+								: t({
+										message: "Open in editor",
+									})
 						}
 						className={cn(
 							// Icon-only when the nearest @container is narrow; the branch
 							// label comes back once there's room (right sidebar is resizable,
-							// so viewport breakpoints don't apply here).
-							"group flex h-6 items-center justify-center gap-1.5 rounded-l border border-r-0 border-border/60 bg-secondary/50 px-1.5 text-xs font-medium @[240px]:pr-2",
+							// so viewport breakpoints don't apply here). The threshold is
+							// higher than the PR badge's so the badge (with its merge
+							// chevron) keeps space priority and never clips in the 240-320px
+							// dead zone (#6385).
+							"group flex h-6 items-center justify-center gap-1.5 rounded-l border border-r-0 border-border/60 bg-secondary/50 px-1.5 text-xs font-medium @[320px]:pr-2",
 							"transition-all duration-150 ease-out",
 							"hover:bg-secondary hover:border-border",
 							"focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
@@ -113,7 +138,7 @@ export function V2OpenInMenuButton({
 						)}
 						{branch && (
 							<OverflowFadeText
-								className="hidden max-w-[140px] text-muted-foreground tabular-nums @[240px]:inline-block"
+								className="hidden max-w-[140px] text-muted-foreground tabular-nums @[320px]:inline-block"
 								title={branch}
 							>
 								/{branch}
@@ -124,11 +149,13 @@ export function V2OpenInMenuButton({
 				<TooltipContent side="bottom" sideOffset={6}>
 					{currentApp ? (
 						<HotkeyLabel
-							label={`Open in ${currentApp.displayLabel ?? currentApp.label}`}
+							label={t({
+								message: `Open in ${currentApp.displayLabel ?? currentApp.label}`,
+							})}
 							id="OPEN_IN_APP"
 						/>
 					) : (
-						"Select an editor from the dropdown"
+						<Trans>Select an editor from the dropdown</Trans>
 					)}
 				</TooltipContent>
 			</Tooltip>

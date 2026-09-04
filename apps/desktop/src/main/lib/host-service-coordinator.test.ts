@@ -68,6 +68,10 @@ const showAlertMock = mock(async () => ({
 	checkboxChecked: false,
 }));
 
+// Keep every electron export name other suite files link against (e.g.
+// browser-manager's webContents/clipboard/Menu): bun's mock.module can swap
+// export values but cannot add names to an already-instantiated module
+// record, so a narrower shape here breaks later files' imports.
 mock.module("electron", () => ({
 	app: {
 		getVersion: () => APP_VERSION,
@@ -76,6 +80,16 @@ mock.module("electron", () => ({
 	},
 	dialog: {
 		showMessageBox: showAlertMock,
+	},
+	webContents: {
+		fromId: mock(() => null),
+	},
+	clipboard: {
+		writeText: mock(() => {}),
+		writeImage: mock(() => {}),
+	},
+	Menu: {
+		buildFromTemplate: mock(() => ({ popup: mock(() => {}) })),
 	},
 }));
 
@@ -175,6 +189,48 @@ describe("HostServiceCoordinator preferred ports", () => {
 		expect(ports).toHaveLength(1);
 		expect(ports[0]).toBeGreaterThanOrEqual(48_000);
 		expect(ports[0]).toBeLessThan(49_000);
+	});
+});
+
+interface StableSecretInternals {
+	getOrCreateSecret(organizationId: string): string;
+}
+
+describe("HostServiceCoordinator stable secret", () => {
+	let coordinator: InstanceType<typeof HostServiceCoordinator>;
+	let internals: StableSecretInternals;
+
+	beforeEach(() => {
+		resetMocks();
+		testManifestRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hsc-test-"));
+		coordinator = new HostServiceCoordinator();
+		internals = coordinator as unknown as StableSecretInternals;
+	});
+
+	afterEach(() => {
+		coordinator.stopAll();
+		if (testManifestRoot) {
+			fs.rmSync(testManifestRoot, { recursive: true, force: true });
+			testManifestRoot = "";
+		}
+	});
+
+	test("hands respawns the same secret clients already hold", () => {
+		const first = internals.getOrCreateSecret("org-1");
+
+		expect(internals.getOrCreateSecret("org-1")).toBe(first);
+		expect(internals.getOrCreateSecret("org-2")).not.toBe(first);
+	});
+
+	test("seeds the secret from a surviving manifest, then keeps it", () => {
+		manifestStore.current = baseManifest(1234);
+
+		expect(internals.getOrCreateSecret("org-1")).toBe("manifest-secret");
+
+		// Sticky once seeded: losing the manifest (crash cleanup) must not
+		// rotate the credential out from under connected clients.
+		manifestStore.current = null;
+		expect(internals.getOrCreateSecret("org-1")).toBe("manifest-secret");
 	});
 });
 
@@ -515,6 +571,165 @@ describe("HostServiceCoordinator single-flight / adoption", () => {
 		expect(conn.port).toBe(60000);
 	});
 
+	/** A live process that looks like the host-service that wrote the manifest. */
+	function stubHolderIdentity(
+		identity: { elapsedMs: number; command: string } | null = {
+			elapsedMs: 30_000,
+			command:
+				"/Applications/Superset.app/Contents/MacOS/Superset /app/host-service.js",
+		},
+	): void {
+		(
+			coordinator as unknown as {
+				inspectProcess: (pid: number) => Promise<typeof identity>;
+			}
+		).inspectProcess = async () => identity;
+	}
+
+	test("reaps an alive-but-unhealthy manifest holder started this boot before spawning", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now() - 20_000,
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		// Alive until SIGKILLed, so the post-kill wait returns promptly.
+		isProcessAliveMock.mockImplementation(() => killedPids.length === 0);
+		stubHolderIdentity();
+
+		const conn = await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toEqual([{ pid: 4321, signal: "SIGKILL" }]);
+		expect(removeManifestMock).toHaveBeenCalled();
+		expect(manifestStore.current).toBeNull();
+		expect(spawnMock).toHaveBeenCalledTimes(1);
+		expect(conn.port).toBe(60000);
+	});
+
+	test("reap leaves a manifest another instance claimed after the kill", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now() - 20_000,
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => killedPids.length === 0);
+		stubHolderIdentity();
+		killProcessMock.mockImplementationOnce((pid, signal) => {
+			killedPids.push({ pid, signal });
+			// A peer claims the manifest between our kill and our removal.
+			manifestStore.current = baseManifest(9999, "http://127.0.0.1:55556");
+		});
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(removeManifestMock).not.toHaveBeenCalled();
+		expect(manifestStore.current?.pid).toBe(9999);
+	});
+
+	test("does not reap when the live pid is not a host-service (same-boot pid recycling)", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now() - 20_000,
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => true);
+		stubHolderIdentity({ elapsedMs: 5_000, command: "/usr/bin/vim notes.md" });
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+		expect(removeManifestMock).not.toHaveBeenCalled();
+		expect(spawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	test("does not reap a host-service that started after the manifest was written (recycled onto another host-service)", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now() - 30 * 60_000,
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => true);
+		// Started 10 s ago; the manifest is 30 min old.
+		stubHolderIdentity({
+			elapsedMs: 10_000,
+			command:
+				"/Applications/Superset.app/Contents/MacOS/Superset /app/host-service.js",
+		});
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+	});
+
+	test("does not reap when the pid cannot be inspected", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now() - 20_000,
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => true);
+		stubHolderIdentity(null);
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+	});
+
+	test("does not reap a manifest whose endpoint was never probed (unparsable)", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "not a url"),
+			startedAt: Date.now() - 20_000,
+		};
+		isProcessAliveMock.mockImplementation(() => true);
+		stubHolderIdentity();
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(pollHealthCheckMock).not.toHaveBeenCalled();
+		expect(killedPids).toHaveLength(0);
+		expect(spawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	test("does not reap a manifest holder whose pid is dead", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now(),
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => false);
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+		expect(spawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	test("does not reap a manifest holder whose startedAt predates this boot (recycled pid)", async () => {
+		// baseManifest's startedAt is 0: older than any boot.
+		manifestStore.current = baseManifest(4321, "http://127.0.0.1:55555");
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(false));
+		isProcessAliveMock.mockImplementation(() => true);
+
+		await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+		expect(removeManifestMock).not.toHaveBeenCalled();
+		expect(spawnMock).toHaveBeenCalledTimes(1);
+	});
+
+	test("does not reap a healthy manifest holder (adopts it instead)", async () => {
+		manifestStore.current = {
+			...baseManifest(4321, "http://127.0.0.1:55555"),
+			startedAt: Date.now(),
+		};
+		pollHealthCheckMock.mockImplementation(() => Promise.resolve(true));
+
+		const conn = await coordinator.start("org-1", spawnConfig);
+
+		expect(killedPids).toHaveLength(0);
+		expect(spawnMock).not.toHaveBeenCalled();
+		expect(conn.port).toBe(55555);
+	});
+
 	test("under-lock double-check adopts a manifest that appears after the first miss", async () => {
 		manifestStore.current = baseManifest(4321, "http://127.0.0.1:55555");
 		// Outer adopt attempt sees nothing; the re-check under the lock does.
@@ -571,6 +786,7 @@ describe("HostServiceCoordinator single-flight / adoption", () => {
 			status: "running",
 			owned: true,
 		});
+		manifestStore.current = baseManifest(4321);
 
 		coordinator.stop("org-1");
 
@@ -618,6 +834,9 @@ describe("HostServiceCoordinator respawn after a crash", () => {
 			port: 55555,
 			secret: "secret",
 			status: "running",
+			spawnedAt: Date.now(),
+			outputTail: "",
+			redactions: ["secret"],
 			owned: true,
 		});
 	}
@@ -870,6 +1089,228 @@ describe("HostServiceCoordinator respawn after a crash", () => {
 
 		// The freshly started child must not be left running past teardown.
 		expect(stopSpy).toHaveBeenCalledWith("org-1");
+	});
+});
+
+describe("HostServiceCoordinator.stop manifest ownership", () => {
+	let coordinator: InstanceType<typeof HostServiceCoordinator>;
+	let internals: { instances: Map<string, unknown> };
+
+	function trackOwned(
+		pid: number,
+		status: "running" | "starting" = "running",
+	): void {
+		internals.instances.set("org-1", {
+			pid,
+			port: 55555,
+			secret: "secret",
+			status,
+			spawnedAt: Date.now(),
+			outputTail: "",
+			redactions: ["secret"],
+			owned: true,
+		});
+	}
+
+	beforeEach(() => {
+		resetMocks();
+		testManifestRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hsc-test-"));
+		coordinator = new HostServiceCoordinator();
+		internals = coordinator as unknown as typeof internals;
+		coordinator.setConfigProvider(async () => spawnConfig);
+	});
+
+	afterEach(() => {
+		coordinator.stopAll();
+		if (testManifestRoot) {
+			fs.rmSync(testManifestRoot, { recursive: true, force: true });
+			testManifestRoot = "";
+		}
+	});
+
+	test("removes the manifest our own child wrote", () => {
+		trackOwned(4242);
+		manifestStore.current = baseManifest(4242);
+
+		coordinator.stop("org-1");
+
+		expect(removeManifestMock).toHaveBeenCalled();
+		expect(manifestStore.current).toBeNull();
+	});
+
+	test("leaves a manifest claimed by another live instance, but still kills our child", () => {
+		trackOwned(4242);
+		manifestStore.current = baseManifest(9999);
+
+		coordinator.stop("org-1");
+
+		expect(removeManifestMock).not.toHaveBeenCalled();
+		expect(manifestStore.current?.pid).toBe(9999);
+		expect(killedPids).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+	});
+
+	test("leaves an unreadable manifest alone (a torn read of a concurrent claim must not be deleted)", () => {
+		trackOwned(4242);
+		manifestStore.current = null;
+
+		coordinator.stop("org-1");
+
+		expect(removeManifestMock).not.toHaveBeenCalled();
+	});
+
+	test("handleChildExit removes only a manifest the dead child held", () => {
+		const internalsWithExit = coordinator as unknown as {
+			instances: Map<string, unknown>;
+			handleChildExit(
+				organizationId: string,
+				childPid: number,
+				code: number | null,
+				signal: NodeJS.Signals | null,
+			): void;
+		};
+		trackOwned(4242, "starting");
+		manifestStore.current = baseManifest(9999);
+
+		internalsWithExit.handleChildExit("org-1", 4242, null, "SIGKILL");
+
+		expect(removeManifestMock).not.toHaveBeenCalled();
+		expect(manifestStore.current?.pid).toBe(9999);
+	});
+
+	test("handleChildExit removes the dead child's own manifest", () => {
+		const internalsWithExit = coordinator as unknown as {
+			instances: Map<string, unknown>;
+			handleChildExit(
+				organizationId: string,
+				childPid: number,
+				code: number | null,
+				signal: NodeJS.Signals | null,
+			): void;
+		};
+		trackOwned(4242, "starting");
+		manifestStore.current = baseManifest(4242);
+
+		internalsWithExit.handleChildExit("org-1", 4242, null, "SIGKILL");
+
+		expect(removeManifestMock).toHaveBeenCalled();
+		expect(manifestStore.current).toBeNull();
+	});
+});
+
+describe("HostServiceCoordinator.stop SIGKILL escalation", () => {
+	let coordinator: InstanceType<typeof HostServiceCoordinator>;
+	let internals: {
+		instances: Map<string, unknown>;
+		handleChildExit(
+			organizationId: string,
+			childPid: number,
+			code: number | null,
+			signal: NodeJS.Signals | null,
+		): void;
+	};
+	let pendingTimers: Array<{ run: () => void; delayMs: number }>;
+
+	function trackOwned(pid: number): void {
+		internals.instances.set("org-1", {
+			pid,
+			port: 55555,
+			secret: "secret",
+			status: "running",
+			spawnedAt: Date.now(),
+			outputTail: "",
+			redactions: ["secret"],
+			owned: true,
+		});
+	}
+
+	beforeEach(() => {
+		resetMocks();
+		testManifestRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hsc-test-"));
+		coordinator = new HostServiceCoordinator();
+		internals = coordinator as unknown as typeof internals;
+		pendingTimers = [];
+		(
+			coordinator as unknown as {
+				scheduleRespawnTimer: (
+					run: () => void,
+					delayMs: number,
+				) => ReturnType<typeof setTimeout>;
+			}
+		).scheduleRespawnTimer = (run, delayMs) => {
+			pendingTimers.push({ run, delayMs });
+			return { unref() {} } as unknown as ReturnType<typeof setTimeout>;
+		};
+	});
+
+	afterEach(() => {
+		coordinator.stopAll();
+		if (testManifestRoot) {
+			fs.rmSync(testManifestRoot, { recursive: true, force: true });
+			testManifestRoot = "";
+		}
+	});
+
+	test("escalates to SIGKILL when the child is still alive after the grace", () => {
+		trackOwned(4242);
+
+		coordinator.stop("org-1");
+
+		expect(killedPids).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+		expect(pendingTimers).toHaveLength(1);
+		expect(pendingTimers[0]?.delayMs).toBeGreaterThan(0);
+
+		pendingTimers[0]?.run();
+
+		expect(killedPids).toEqual([
+			{ pid: 4242, signal: "SIGTERM" },
+			{ pid: 4242, signal: "SIGKILL" },
+		]);
+	});
+
+	test("does not SIGKILL when the child exited before the grace elapsed", () => {
+		trackOwned(4242);
+
+		coordinator.stop("org-1");
+		internals.handleChildExit("org-1", 4242, 0, null);
+		pendingTimers[0]?.run();
+
+		expect(killedPids).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+	});
+
+	test("does not SIGKILL a pid that is already gone when the grace elapses", () => {
+		trackOwned(4242);
+
+		coordinator.stop("org-1");
+		isProcessAliveMock.mockImplementation(() => false);
+		pendingTimers[0]?.run();
+
+		expect(killedPids).toEqual([{ pid: 4242, signal: "SIGTERM" }]);
+	});
+
+	test("never schedules an escalation for an adopted (foreign) child", () => {
+		internals.instances.set("org-1", {
+			pid: 4321,
+			port: 55555,
+			secret: "manifest-secret",
+			status: "running",
+			owned: false,
+		});
+
+		coordinator.stop("org-1");
+
+		expect(killedPids).toHaveLength(0);
+		expect(pendingTimers).toHaveLength(0);
+	});
+});
+
+describe("parseEtime", () => {
+	test("parses ps's [[dd-]hh:]mm:ss elapsed column", async () => {
+		const { parseEtime } = await import("./host-service-coordinator");
+		expect(parseEtime("00:05")).toBe(5_000);
+		expect(parseEtime("01:02:03")).toBe((3600 + 120 + 3) * 1000);
+		expect(parseEtime("2-01:02:03")).toBe((2 * 86400 + 3600 + 120 + 3) * 1000);
+		expect(parseEtime("garbage")).toBeNull();
+		expect(parseEtime("")).toBeNull();
 	});
 });
 

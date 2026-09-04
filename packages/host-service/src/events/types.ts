@@ -34,6 +34,18 @@ export interface AgentLifecycleMessage {
 	occurredAt: number;
 }
 
+/**
+ * Invalidation-only signal for host-owned agent bindings changed outside a
+ * lifecycle hook (for example, the sidebar's Clear Status action). This is
+ * intentionally separate from `agent:lifecycle`: consumers should refetch
+ * binding state without playing completion sounds or showing notifications.
+ */
+export interface AgentBindingsChangedMessage {
+	type: "agent:bindings-changed";
+	workspaceId: string;
+	occurredAt: number;
+}
+
 export interface TerminalLifecycleMessage {
 	type: "terminal:lifecycle";
 	workspaceId: string;
@@ -60,15 +72,24 @@ export interface PortChangedMessage {
  */
 export interface WorkspaceSnapshot {
 	id: string;
-	projectId: string;
+	/** Null for project-less "session" workspaces. */
+	projectId: string | null;
 	name: string;
 	branch: string;
-	type: "main" | "worktree";
+	type: "main" | "worktree" | "session";
 	worktreePath: string;
 	taskId: string | null;
 	createdByUserId: string | null;
 	createdAt: number;
 	updatedAt: number;
+	/**
+	 * Epoch ms of the newest agent lifecycle event, or null for rows that
+	 * predate the column. Unlike `updatedAt` it never moves on metadata
+	 * writes (rename, tags, PR link).
+	 */
+	lastActivityAt: number | null;
+	/** Normalized, sorted tag set; sidebar folders derive from it. */
+	tags: string[];
 }
 
 export interface WorkspaceChangedMessage {
@@ -77,6 +98,33 @@ export interface WorkspaceChangedMessage {
 	eventType: "created" | "updated" | "deleted";
 	/** Null for `deleted` — the row is already gone. */
 	workspace: WorkspaceSnapshot | null;
+	occurredAt: number;
+}
+
+/** One tag folder's host-side presentation (see tag_folder_settings). */
+export interface TagSettingSnapshot {
+	tag: string;
+	displayName: string | null;
+	color: string | null;
+	tabOrder: number | null;
+}
+
+/**
+ * A tag folder's presentation plus the scope it lives under — a project id,
+ * or `SESSIONS_TAG_SCOPE` for the project-less Sessions lane. Folders travel
+ * on their own channel rather than riding project snapshots, because the
+ * Sessions lane has no project to ride on.
+ */
+export interface TagFolderSettingSnapshot extends TagSettingSnapshot {
+	scope: string;
+}
+
+export interface TagFoldersChangedMessage {
+	type: "tag-folders:changed";
+	/** The scope whose folders changed. */
+	scope: string;
+	/** The scope's full set after the change — empty when all were removed. */
+	settings: TagFolderSettingSnapshot[];
 	occurredAt: number;
 }
 
@@ -95,8 +143,15 @@ export interface ProjectSnapshot {
 	worktreeBaseDir: string | null;
 	/** Custom icon data-URI, or null to fall back to the GitHub avatar. */
 	icon: string | null;
+	/** Accent color as a `#rrggbb` hex, or null for the default. */
+	color: string | null;
 	createdAt: number;
 	updatedAt: number;
+	/**
+	 * @deprecated Compatibility for desktops that predate the tagFolders
+	 * router. New consumers read tag-folder presentation from that router.
+	 */
+	tagSettings?: TagSettingSnapshot[];
 }
 
 export interface ProjectChangedMessage {
@@ -108,19 +163,59 @@ export interface ProjectChangedMessage {
 	occurredAt: number;
 }
 
+export interface WorkspaceCreateTerminalLaunch {
+	terminalId: string;
+	label?: string;
+}
+
+export type WorkspaceCreateAgentLaunch =
+	| { ok: true; kind: "terminal"; sessionId: string; label: string }
+	| { ok: false; error: string };
+
+/**
+ * Terminal event for an enqueued `workspaces.createEnqueued` call. The HTTP
+ * response returns immediately; this carries what the synchronous
+ * `workspaces.create` response used to: the canonical row id (which can
+ * differ from the enqueue id when the create resolved to an existing
+ * workspace) and the launched terminals/agents for the pane-layout seed.
+ */
+export interface WorkspaceCreateSettledMessage {
+	type: "workspace:create-settled";
+	/** The client-minted id from the enqueue call — the correlation key. */
+	workspaceId: string;
+	ok: boolean;
+	canonicalWorkspaceId: string | null;
+	projectId: string | null;
+	terminals: WorkspaceCreateTerminalLaunch[];
+	agents: WorkspaceCreateAgentLaunch[];
+	alreadyExists: boolean;
+	error?: string;
+	occurredAt: number;
+}
+
 export interface EventBusErrorMessage {
 	type: "error";
 	message: string;
+}
+
+export interface PageWatchChangedMessage {
+	type: "page-watch:changed";
+	workspaceId: string;
+	occurredAt: number;
 }
 
 export type ServerMessage =
 	| FsEventsMessage
 	| GitChangedMessage
 	| AgentLifecycleMessage
+	| AgentBindingsChangedMessage
 	| TerminalLifecycleMessage
 	| PortChangedMessage
 	| WorkspaceChangedMessage
+	| WorkspaceCreateSettledMessage
 	| ProjectChangedMessage
+	| TagFoldersChangedMessage
+	| PageWatchChangedMessage
 	| EventBusErrorMessage;
 
 // ── Client → Server ────────────────────────────────────────────────
@@ -135,4 +230,27 @@ export interface FsUnwatchCommand {
 	workspaceId: string;
 }
 
-export type ClientMessage = FsWatchCommand | FsUnwatchCommand;
+/**
+ * Targeted watch on one file the recursive workspace watcher can't see
+ * (inside a pruned subtree — gitignored build dir, node_modules, nested
+ * repo). Sent by the renderer for every open document; the server installs a
+ * per-file watcher only when the recursive watch doesn't already cover the
+ * path. Events come back as regular `fs:events` messages.
+ */
+export interface FsWatchFileCommand {
+	type: "fs:watch-file";
+	workspaceId: string;
+	absolutePath: string;
+}
+
+export interface FsUnwatchFileCommand {
+	type: "fs:unwatch-file";
+	workspaceId: string;
+	absolutePath: string;
+}
+
+export type ClientMessage =
+	| FsWatchCommand
+	| FsUnwatchCommand
+	| FsWatchFileCommand
+	| FsUnwatchFileCommand;

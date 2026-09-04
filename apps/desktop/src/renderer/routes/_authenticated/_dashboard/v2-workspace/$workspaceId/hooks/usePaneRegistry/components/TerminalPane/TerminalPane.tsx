@@ -1,7 +1,11 @@
+import { useLingui } from "@lingui/react/macro";
 import type { RendererContext } from "@superset/panes";
+import { FEATURE_FLAGS } from "@superset/shared/constants";
+import { toast } from "@superset/ui/sonner";
 import { cn } from "@superset/ui/utils";
 import { workspaceTrpc } from "@superset/workspace-client";
 import "@xterm/xterm/css/xterm.css";
+import { useFeatureFlagEnabled } from "posthog-js/react";
 import {
 	useCallback,
 	useEffect,
@@ -10,13 +14,15 @@ import {
 	useState,
 	useSyncExternalStore,
 } from "react";
+import { env } from "renderer/env.renderer";
 import { useHotkey } from "renderer/hotkeys";
 import {
 	actionLabel,
-	folderIntentFor,
+	type FolderClickPolicy,
 	folderIntentLabel,
 	LinkHoverHint,
 	useTerminalFilePolicy,
+	useTerminalFolderPolicy,
 	useTerminalUrlPolicy,
 } from "renderer/lib/clickPolicy";
 import {
@@ -25,17 +31,25 @@ import {
 } from "renderer/lib/terminal/terminal-runtime-registry";
 import { electronTrpcClient } from "renderer/lib/trpc-client";
 import { useOpenInExternalEditor } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/hooks/useOpenInExternalEditor";
+import { useRevealInFinder } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/hooks/useRevealInFinder";
 import type {
 	PaneViewerData,
 	TerminalPaneData,
 } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/types";
+import { openPagePaneInStore } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/utils/openPagePaneInStore";
 import { openUrlInV2Workspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/utils/openUrlInV2Workspace";
 import { useWorkspaceWsUrl } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceTrpcProvider/WorkspaceTrpcProvider";
+import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
+import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import { ScrollToBottomButton } from "renderer/screens/main/components/WorkspaceView/ContentView/TabsContent/Terminal/ScrollToBottomButton";
 import { TerminalSearch } from "renderer/screens/main/components/WorkspaceView/ContentView/TabsContent/Terminal/TerminalSearch";
 import { useTheme } from "renderer/stores/theme";
 import { resolveTerminalThemeType } from "renderer/stores/theme/utils";
+import { isWithinWorkspacePath } from "shared/absolute-paths";
+import { TerminalAgentAutoResume } from "./components/TerminalAgentAutoResume";
+import { TerminalCopiedIndicator } from "./components/TerminalCopiedIndicator";
 import { TerminalRichInput } from "./components/TerminalRichInput";
+import { useCopyOnSelect } from "./hooks/useCopyOnSelect";
 import { useLinkClickHint } from "./hooks/useLinkClickHint";
 import { type HoveredLink, useLinkHoverState } from "./hooks/useLinkHoverState";
 import { useTerminalAppearance } from "./hooks/useTerminalAppearance";
@@ -44,7 +58,9 @@ import {
 	terminalRichInputOpenStore,
 	useTerminalRichInputOpen,
 } from "./richInputOpenStore";
+import { PasteUploadLimitError, uploadPastedFiles } from "./uploadPastedFiles";
 import { shellEscapePaths } from "./utils";
+import { parseSupersetPageUrl } from "./utils/parseSupersetPageUrl";
 
 interface TerminalPaneProps {
 	ctx: RendererContext<PaneViewerData>;
@@ -59,8 +75,11 @@ export function TerminalPane({
 	onOpenFile,
 	onRevealPath,
 }: TerminalPaneProps) {
+	const { t } = useLingui();
 	const filePolicy = useTerminalFilePolicy();
 	const urlPolicy = useTerminalUrlPolicy();
+	const folderPolicy = useTerminalFolderPolicy();
+	const isPagesEnabled = useFeatureFlagEnabled(FEATURE_FLAGS.PAGES) ?? false;
 	const {
 		hoveredLink,
 		onHover: onLinkHover,
@@ -68,6 +87,14 @@ export function TerminalPane({
 	} = useLinkHoverState();
 	const { hint, showHint } = useLinkClickHint();
 	const openInExternalEditor = useOpenInExternalEditor(workspaceId);
+	const revealInFinder = useRevealInFinder(workspaceId);
+	// The "reveal" intent falls back to Finder for folders outside the
+	// worktree (revealPath's containment check); the hover label needs the
+	// same knowledge so it doesn't promise a sidebar reveal it can't do.
+	const workspaceQuery = workspaceTrpc.workspace.get.useQuery({
+		id: workspaceId,
+	});
+	const worktreePath = workspaceQuery.data?.worktreePath ?? undefined;
 	const paneData = ctx.pane.data as TerminalPaneData;
 	const { terminalId } = paneData;
 	const terminalInstanceId = ctx.pane.id;
@@ -93,6 +120,9 @@ export function TerminalPane({
 	const themedUrl = new URL(baseWebsocketUrl);
 	themedUrl.searchParams.set("workspaceId", workspaceId);
 	themedUrl.searchParams.set("themeType", themeType);
+	if (paneData.createOnAttach) {
+		themedUrl.searchParams.set("create", "1");
+	}
 	const websocketUrl = themedUrl.toString();
 	const websocketUrlRef = useRef(websocketUrl);
 	websocketUrlRef.current = websocketUrl;
@@ -101,10 +131,10 @@ export function TerminalPane({
 
 	const workspaceTrpcUtils = workspaceTrpc.useUtils();
 	const invalidateTerminalSessionsRef = useRef(
-		workspaceTrpcUtils.terminal.listSessions.invalidate,
+		workspaceTrpcUtils.terminal.list.invalidate,
 	);
 	invalidateTerminalSessionsRef.current =
-		workspaceTrpcUtils.terminal.listSessions.invalidate;
+		workspaceTrpcUtils.terminal.list.invalidate;
 
 	// useCallback so useSyncExternalStore doesn't re-subscribe every render —
 	// otherwise every keystroke-triggered re-render unsubscribes and
@@ -136,9 +166,10 @@ export function TerminalPane({
 	//      container back into the live tree, preserving the buffer.
 	//   2. connect() attaches the WebSocket to that terminalId. The socket is
 	//      transport only; it does not carry creation-time intent.
-	// The pane never calls createSession — that's useV2TerminalLauncher's job,
-	// awaited at the call site before the pane is added to the store. By the
-	// time this effect runs, the host-service session already exists.
+	// The pane never calls createSession over HTTP. Optimistically-inserted
+	// panes (`createOnAttach`) let the WS attach create the session; other
+	// panes' sessions were created by useV2TerminalLauncher before the pane
+	// landed in the store.
 	// Deps narrowed to the terminal identity so provider key remount churn
 	// (workspaceId/client briefly flipping while pane data catches up) doesn't
 	// re-run this effect. Mutable inputs are read through refs.
@@ -257,7 +288,7 @@ export function TerminalPane({
 				},
 				onFileLinkClick: (event, link) => {
 					if (link.isDirectory) {
-						const intent = folderIntentFor(event);
+						const intent = folderPolicy.getIntent(event);
 						if (intent === null) {
 							showHint(event.clientX, event.clientY);
 							return;
@@ -265,6 +296,8 @@ export function TerminalPane({
 						event.preventDefault();
 						if (intent === "external") {
 							openInExternalEditor(link.resolvedPath);
+						} else if (intent === "finder") {
+							revealInFinder(link.resolvedPath, { isDirectory: true });
 						} else {
 							onRevealPath(link.resolvedPath, { isDirectory: true });
 						}
@@ -299,13 +332,20 @@ export function TerminalPane({
 						electronTrpcClient.external.openUrl.mutate(url).catch((error) => {
 							console.error("[v2 Terminal] Failed to open URL:", url, error);
 						});
-					} else {
-						openUrlInV2Workspace({
-							store: ctx.store,
-							target: action === "newTab" ? "new-tab" : "current-tab",
-							url,
-						});
+						return;
 					}
+					const pageSlug = isPagesEnabled
+						? parseSupersetPageUrl(url, env.NEXT_PUBLIC_WEB_URL)
+						: null;
+					if (pageSlug) {
+						openPagePaneInStore(ctx.store, { slug: pageSlug });
+						return;
+					}
+					openUrlInV2Workspace({
+						store: ctx.store,
+						target: action === "newTab" ? "new-tab" : "current-tab",
+						url,
+					});
 				},
 				onLinkHover,
 				onLinkLeave,
@@ -320,11 +360,103 @@ export function TerminalPane({
 		onOpenFile,
 		onRevealPath,
 		openInExternalEditor,
+		revealInFinder,
 		onLinkHover,
 		onLinkLeave,
 		showHint,
 		filePolicy,
 		urlPolicy,
+		folderPolicy,
+		isPagesEnabled,
+	]);
+
+	// --- Remote image paste ---
+	// The default paste path forwards Ctrl+V and lets the TUI read the OS
+	// clipboard — which only exists on the machine the PTY runs on. When the
+	// workspace lives on another host (relay-reached machine, cloud sandbox),
+	// ship the clipboard bytes there via filesystem.writeFile and paste the
+	// resulting paths instead. Local workspaces keep the Ctrl+V forward, which
+	// lets TUIs attach the image natively.
+	const { machineId } = useLocalHostService();
+	const hostWorkspaces = useHostWorkspaces();
+	const workspaceHostId = hostWorkspaces.workspaces.find(
+		(w) => w.id === workspaceId,
+	)?.hostId;
+	// A cloud sandbox workspace has no host row, so "known list is ready and
+	// the workspace isn't in it" also means remote. Until the list is ready
+	// the override stays unset and paste falls back to the local behavior.
+	const isRemoteHost =
+		hostWorkspaces.isReady &&
+		Boolean(machineId) &&
+		workspaceHostId !== machineId;
+
+	const writeFileMutation = workspaceTrpc.filesystem.writeFile.useMutation();
+	const createDirectoryMutation =
+		workspaceTrpc.filesystem.createDirectory.useMutation();
+	const writeFileRef = useRef(writeFileMutation.mutateAsync);
+	writeFileRef.current = writeFileMutation.mutateAsync;
+	const createDirectoryRef = useRef(createDirectoryMutation.mutateAsync);
+	createDirectoryRef.current = createDirectoryMutation.mutateAsync;
+
+	// Fire-and-forget: ship files to the workspace, then paste the paths.
+	const uploadAndPasteFiles = useCallback(
+		(files: File[], worktree: string) => {
+			void (async () => {
+				try {
+					const paths = await uploadPastedFiles({
+						deps: {
+							createDirectory: (input) => createDirectoryRef.current(input),
+							writeFile: (input) => writeFileRef.current(input),
+						},
+						workspaceId,
+						worktreePath: worktree,
+						files,
+					});
+					terminalRuntimeRegistry.paste(
+						terminalId,
+						shellEscapePaths(paths),
+						terminalInstanceId,
+					);
+				} catch (error) {
+					console.error("[v2 Terminal] remote file upload failed", error);
+					toast.error(
+						error instanceof PasteUploadLimitError
+							? error.message
+							: files.length === 1
+								? t({
+										message: "Failed to send the file to the remote workspace",
+									})
+								: t({
+										message: "Failed to send the files to the remote workspace",
+									}),
+					);
+				}
+			})();
+		},
+		[terminalId, terminalInstanceId, workspaceId, t],
+	);
+
+	useEffect(() => {
+		if (!isRemoteHost || !worktreePath) return;
+
+		terminalRuntimeRegistry.setImagePasteOverride(
+			terminalId,
+			(files) => uploadAndPasteFiles(files, worktreePath),
+			terminalInstanceId,
+		);
+		return () => {
+			terminalRuntimeRegistry.setImagePasteOverride(
+				terminalId,
+				null,
+				terminalInstanceId,
+			);
+		};
+	}, [
+		terminalId,
+		terminalInstanceId,
+		worktreePath,
+		isRemoteHost,
+		uploadAndPasteFiles,
 	]);
 
 	useTerminalInterruptClear({
@@ -333,6 +465,8 @@ export function TerminalPane({
 		workspaceId,
 		connectionState,
 	});
+
+	useCopyOnSelect({ terminalId, terminalInstanceId, connectionState });
 
 	useHotkey(
 		"CLEAR_TERMINAL",
@@ -422,6 +556,31 @@ export function TerminalPane({
 		dragCounterRef.current = 0;
 		setIsDropActive(false);
 		if (connectionState === "closed") return;
+
+		// Dropped OS paths are local paths — meaningless on the machine a
+		// remote workspace's PTY runs on. When every dropped entry is a plain
+		// file, ship the bytes instead. Folders keep the path flow (their File
+		// entries carry no content), which at least preserves today's behavior.
+		if (isRemoteHost && worktreePath) {
+			const items = Array.from(event.dataTransfer.items);
+			const allPlainFiles =
+				items.length > 0 &&
+				items.every(
+					(item) =>
+						item.kind === "file" &&
+						typeof item.webkitGetAsEntry === "function" &&
+						item.webkitGetAsEntry()?.isFile === true,
+				);
+			const files = Array.from(event.dataTransfer.files);
+			if (allPlainFiles && files.length > 0) {
+				terminalRuntimeRegistry
+					.getTerminal(terminalId, terminalInstanceId)
+					?.focus();
+				uploadAndPasteFiles(files, worktreePath);
+				return;
+			}
+		}
+
 		const text = resolveDroppedText(event.dataTransfer);
 		if (!text) return;
 		terminalRuntimeRegistry
@@ -451,6 +610,14 @@ export function TerminalPane({
 					style={{ backgroundColor: appearance.background }}
 				/>
 				<ScrollToBottomButton terminal={terminal} />
+				<TerminalCopiedIndicator terminalInstanceId={terminalInstanceId} />
+				<TerminalAgentAutoResume
+					key={terminalId}
+					workspaceId={workspaceId}
+					terminalId={terminalId}
+					connectionState={connectionState}
+					ctx={ctx}
+				/>
 			</div>
 			<TerminalRichInput
 				workspaceId={workspaceId}
@@ -466,7 +633,13 @@ export function TerminalPane({
 				)}
 			/>
 			<LinkHoverHint
-				hoverLabel={resolveHoverLabel(hoveredLink, filePolicy, urlPolicy)}
+				hoverLabel={resolveHoverLabel(
+					hoveredLink,
+					filePolicy,
+					urlPolicy,
+					folderPolicy,
+					worktreePath,
+				)}
 				hoverPosition={hoveredLink}
 				clickHint={hint}
 			/>
@@ -475,13 +648,16 @@ export function TerminalPane({
 }
 
 // Compute "what would clicking right now do?" for the live link tooltip.
-// Folders use the hardcoded folderIntent rule; files/urls go through the
-// settings-driven policies. Returns null when no modifier is held or the
-// matching tier is unbound — the tooltip stays hidden in that case.
+// Files, URLs, and folders all resolve through their settings-driven
+// policies; folders additionally swap "reveal" for the Finder fallback when
+// the path sits outside the worktree. Returns null when the matching tier
+// is unbound — the tooltip stays hidden in that case.
 function resolveHoverLabel(
 	hovered: HoveredLink | null,
 	filePolicy: ReturnType<typeof useTerminalFilePolicy>,
 	urlPolicy: ReturnType<typeof useTerminalUrlPolicy>,
+	folderPolicy: FolderClickPolicy,
+	worktreePath: string | undefined,
 ): string | null {
 	if (!hovered) return null;
 	const event = {
@@ -494,7 +670,18 @@ function resolveHoverLabel(
 		return action ? actionLabel(action, "url") : null;
 	}
 	if (hovered.info.isDirectory) {
-		return folderIntentLabel(folderIntentFor(event));
+		const intent = folderPolicy.getIntent(event);
+		// A folder outside the worktree can't be revealed in the sidebar —
+		// clicking falls back to Finder (revealPath), so say that instead.
+		if (
+			intent === "reveal" &&
+			worktreePath &&
+			hovered.info.resolvedPath &&
+			!isWithinWorkspacePath(worktreePath, hovered.info.resolvedPath)
+		) {
+			return folderIntentLabel("finder");
+		}
+		return folderIntentLabel(intent);
 	}
 	const action = filePolicy.getAction(event);
 	return action ? actionLabel(action, "file") : null;

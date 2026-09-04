@@ -1,6 +1,12 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useProjectHost } from "renderer/routes/_authenticated/_dashboard/hooks/useProjectHost";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDebouncedSearchNavigation } from "renderer/routes/_authenticated/_dashboard/hooks/useDebouncedSearchNavigation";
+import { useProjectQueryTargets } from "renderer/routes/_authenticated/_dashboard/hooks/useProjectQueryTargets";
+import { normalizeAuthorFilter } from "renderer/routes/_authenticated/_dashboard/pull-requests/utils/normalizeAuthorFilter";
+import {
+	normalizePullRequestReviewFilter,
+	type PullRequestReviewFilter,
+} from "renderer/routes/_authenticated/_dashboard/pull-requests/utils/pullRequestReviewFilter";
 import {
 	pullRequestsSearchFromFilters,
 	usePullRequestsFilterStore,
@@ -10,37 +16,84 @@ import { PullRequestsTopBar } from "./components/PullRequestsTopBar";
 
 interface PullRequestsViewProps {
 	initialSearch?: string;
-	initialProject?: string;
-	initialState?: "open" | "all";
+	initialProjects?: string[];
+	initialAuthor?: string;
+	initialReview?: string;
+	initialState?: "open" | "all" | "merged";
+	/** The PR currently open in the detail pane, if any — filter/search
+	 *  changes navigate back to it instead of collapsing the detail pane. */
+	selectedPrNumber?: number | null;
+	/** The open PR's own project id — distinct from the list's `projects`
+	 *  filter, and must survive filter-driven re-navigations. */
+	selectedPrProjectId?: string | null;
 }
 
 export function PullRequestsView({
 	initialSearch,
-	initialProject,
+	initialProjects,
+	initialAuthor,
+	initialReview,
 	initialState,
+	selectedPrNumber = null,
+	selectedPrProjectId = null,
 }: PullRequestsViewProps) {
 	const navigate = useNavigate();
 	const {
-		projectFilter: storedProjectFilter,
+		search: storedSearch,
+		projectFilters: storedProjectFilters,
+		authorFilter: storedAuthorFilter,
+		reviewFilter: storedReviewFilter,
 		includeClosed: storedIncludeClosed,
+		mergedOnly: storedMergedOnly,
 		setSearch: storeSetSearch,
-		setProjectFilter: storeSetProjectFilter,
+		setProjectFilters: storeSetProjectFilters,
+		setAuthorFilter: storeSetAuthorFilter,
+		setReviewFilter: storeSetReviewFilter,
 		setIncludeClosed: storeSetIncludeClosed,
+		setMergedOnly: storeSetMergedOnly,
 	} = usePullRequestsFilterStore();
-	const [searchQuery, setSearchQuery] = useState(initialSearch ?? "");
-	const projectFilter = initialProject ?? storedProjectFilter;
+	const [searchQuery, setSearchQuery] = useState(initialSearch ?? storedSearch);
+	const projectFilters = initialProjects ?? storedProjectFilters;
+	const authorFilter =
+		initialAuthor === undefined
+			? storedAuthorFilter
+			: normalizeAuthorFilter(initialAuthor);
+	const reviewFilter =
+		initialReview === undefined
+			? storedReviewFilter
+			: normalizePullRequestReviewFilter(initialReview);
 	const includeClosed =
-		initialState === undefined ? storedIncludeClosed : initialState === "all";
-	const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
+		initialState === undefined
+			? storedIncludeClosed
+			: initialState === "all" || initialState === "merged";
+	const mergedOnly =
+		initialState === undefined ? storedMergedOnly : initialState === "merged";
+	// Filter/search changes must not collapse an open detail pane.
+	const navigateTo = useCallback(
+		(search: Record<string, string>) =>
+			selectedPrNumber != null
+				? navigate({
+						to: "/pull-requests/$prNumber",
+						params: { prNumber: String(selectedPrNumber) },
+						search: selectedPrProjectId
+							? { ...search, project: selectedPrProjectId }
+							: search,
+						replace: true,
+					})
+				: navigate({ to: "/pull-requests", search, replace: true }),
+		[navigate, selectedPrNumber, selectedPrProjectId],
+	);
 	const {
-		hostId: projectHostId,
 		isReady: areProjectsReady,
-		project: selectedProject,
 		projects: hostProjects,
-	} = useProjectHost(projectFilter);
+		targets: projectTargets,
+	} = useProjectQueryTargets(projectFilters);
 
+	// Sync only from the URL: depending on storedSearch would snap the input
+	// back to the stale URL value on every keystroke until the debounced
+	// navigation lands.
 	useEffect(() => {
-		setSearchQuery(initialSearch ?? "");
+		if (initialSearch !== undefined) setSearchQuery(initialSearch);
 	}, [initialSearch]);
 
 	useEffect(() => {
@@ -50,46 +103,62 @@ export function PullRequestsView({
 	const buildSearch = useCallback(
 		(overrides: {
 			search?: string;
-			project?: string | null;
+			projects?: string[];
+			author?: string | null;
+			review?: PullRequestReviewFilter | null;
 			includeClosed?: boolean;
+			mergedOnly?: boolean;
 		}) =>
 			pullRequestsSearchFromFilters({
 				search: overrides.search ?? searchQuery,
-				projectFilter:
-					overrides.project !== undefined ? overrides.project : projectFilter,
+				projectFilters:
+					overrides.projects !== undefined
+						? overrides.projects
+						: projectFilters,
+				authorFilter:
+					overrides.author !== undefined ? overrides.author : authorFilter,
+				reviewFilter:
+					overrides.review !== undefined ? overrides.review : reviewFilter,
 				includeClosed: overrides.includeClosed ?? includeClosed,
+				mergedOnly: overrides.mergedOnly ?? mergedOnly,
 			}),
-		[includeClosed, projectFilter, searchQuery],
+		[
+			authorFilter,
+			includeClosed,
+			mergedOnly,
+			projectFilters,
+			reviewFilter,
+			searchQuery,
+		],
 	);
-
-	const syncSearchToUrl = useCallback(
-		(query: string) => {
-			if (debounceRef.current) clearTimeout(debounceRef.current);
-			debounceRef.current = setTimeout(() => {
-				navigate({
-					to: "/pull-requests",
-					search: buildSearch({ search: query }),
-					replace: true,
-				});
-			}, 300);
-		},
-		[buildSearch, navigate],
+	const navigateSearch = useCallback(
+		(query: string) => navigateTo(buildSearch({ search: query })),
+		[buildSearch, navigateTo],
 	);
-
-	useEffect(
-		() => () => {
-			if (debounceRef.current) clearTimeout(debounceRef.current);
-		},
-		[],
-	);
+	const {
+		cancelPendingSearchNavigation,
+		scheduleSearchNavigation: syncSearchToUrl,
+	} = useDebouncedSearchNavigation(navigateSearch);
 
 	useEffect(() => {
-		storeSetProjectFilter(projectFilter);
-	}, [projectFilter, storeSetProjectFilter]);
+		storeSetProjectFilters(projectFilters);
+	}, [projectFilters, storeSetProjectFilters]);
+
+	useEffect(() => {
+		storeSetAuthorFilter(authorFilter);
+	}, [authorFilter, storeSetAuthorFilter]);
+
+	useEffect(() => {
+		storeSetReviewFilter(reviewFilter);
+	}, [reviewFilter, storeSetReviewFilter]);
 
 	useEffect(() => {
 		storeSetIncludeClosed(includeClosed);
 	}, [includeClosed, storeSetIncludeClosed]);
+
+	useEffect(() => {
+		storeSetMergedOnly(mergedOnly);
+	}, [mergedOnly, storeSetMergedOnly]);
 
 	const projects = useMemo(
 		() =>
@@ -99,22 +168,36 @@ export function PullRequestsView({
 			})),
 		[hostProjects],
 	);
+	const repoSlugByProjectId = useMemo(
+		() =>
+			new Map(
+				hostProjects.map((project) => [
+					project.projectKey,
+					project.repoOwner && project.repoName
+						? `${project.repoOwner}/${project.repoName}`
+						: project.name,
+				]),
+			),
+		[hostProjects],
+	);
 
 	useEffect(() => {
-		if (
-			projectFilter &&
-			projects.some((project) => project.id === projectFilter)
-		)
-			return;
 		if (!areProjectsReady) return;
-		const firstProject = projects[0];
-		if (!firstProject) return;
-		navigate({
-			to: "/pull-requests",
-			search: buildSearch({ project: firstProject.id }),
-			replace: true,
-		});
-	}, [areProjectsReady, buildSearch, navigate, projectFilter, projects]);
+		const availableIds = new Set(projects.map((project) => project.id));
+		const availableFilters = projectFilters.filter((projectId) =>
+			availableIds.has(projectId),
+		);
+		if (availableFilters.length === projectFilters.length) return;
+		cancelPendingSearchNavigation();
+		navigateTo(buildSearch({ projects: availableFilters }));
+	}, [
+		areProjectsReady,
+		buildSearch,
+		cancelPendingSearchNavigation,
+		navigateTo,
+		projectFilters,
+		projects,
+	]);
 
 	const handleSearchChange = useCallback(
 		(query: string) => {
@@ -125,23 +208,46 @@ export function PullRequestsView({
 		[storeSetSearch, syncSearchToUrl],
 	);
 
-	const handleProjectFilterChange = (project: string) => {
-		storeSetProjectFilter(project);
-		navigate({
-			to: "/pull-requests",
-			search: buildSearch({ project }),
-			replace: true,
-		});
+	const handleProjectFiltersChange = (projects: string[]) => {
+		cancelPendingSearchNavigation();
+		storeSetProjectFilters(projects);
+		navigateTo(buildSearch({ projects }));
 	};
 
-	const handleIncludeClosedChange = (nextIncludeClosed: boolean) => {
+	/** Drives the All / Open / Merged segmented control as one control. */
+	const handleStateFilterChange = (next: "open" | "all" | "merged") => {
+		cancelPendingSearchNavigation();
+		const nextIncludeClosed = next !== "open";
+		const nextMergedOnly = next === "merged";
 		storeSetIncludeClosed(nextIncludeClosed);
-		navigate({
-			to: "/pull-requests",
-			search: buildSearch({ includeClosed: nextIncludeClosed }),
-			replace: true,
-		});
+		storeSetMergedOnly(nextMergedOnly);
+		navigateTo(
+			buildSearch({
+				includeClosed: nextIncludeClosed,
+				mergedOnly: nextMergedOnly,
+			}),
+		);
 	};
+
+	const handleAuthorFilterChange = (nextAuthor: string | null) => {
+		cancelPendingSearchNavigation();
+		storeSetAuthorFilter(nextAuthor);
+		navigateTo(buildSearch({ author: nextAuthor }));
+	};
+
+	const handleReviewFilterChange = (
+		nextReview: PullRequestReviewFilter | null,
+	) => {
+		cancelPendingSearchNavigation();
+		storeSetReviewFilter(nextReview);
+		navigateTo(buildSearch({ review: nextReview }));
+	};
+
+	const stateFilter: "open" | "all" | "merged" = mergedOnly
+		? "merged"
+		: includeClosed
+			? "all"
+			: "open";
 
 	return (
 		<div
@@ -151,19 +257,30 @@ export function PullRequestsView({
 			<PullRequestsTopBar
 				searchQuery={searchQuery}
 				onSearchChange={handleSearchChange}
-				projectFilter={projectFilter}
-				onProjectFilterChange={handleProjectFilterChange}
-				includeClosed={includeClosed}
-				onIncludeClosedChange={handleIncludeClosedChange}
+				projectFilters={projectFilters}
+				onProjectFiltersChange={handleProjectFiltersChange}
+				projectTargets={projectTargets}
+				authorFilter={authorFilter}
+				onAuthorFilterChange={handleAuthorFilterChange}
+				reviewFilter={reviewFilter}
+				onReviewFilterChange={handleReviewFilterChange}
+				stateFilter={stateFilter}
+				onStateFilterChange={handleStateFilterChange}
 			/>
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
 				<PullRequestsContent
-					projectFilter={selectedProject?.projectKey ?? null}
-					hostId={projectHostId}
+					projectFilters={projectFilters}
+					projectTargets={projectTargets}
 					areProjectsReady={areProjectsReady}
 					hasProjects={projects.length > 0}
 					searchQuery={searchQuery}
+					authorFilter={authorFilter}
+					reviewFilter={reviewFilter}
 					includeClosed={includeClosed}
+					mergedOnly={mergedOnly}
+					selectedPrNumber={selectedPrNumber}
+					selectedPrProjectId={selectedPrProjectId}
+					repoSlugByProjectId={repoSlugByProjectId}
 				/>
 			</div>
 		</div>

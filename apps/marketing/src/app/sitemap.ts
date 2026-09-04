@@ -1,6 +1,9 @@
+import { SUPPORTED_LOCALES } from "@superset/i18n";
 import { COMPANY } from "@superset/shared/constants";
 import type { MetadataRoute } from "next";
+import { localeUrl } from "@/app/[lang]/metadata";
 import { getBlogPosts } from "@/lib/blog";
+import { getCategoryPages } from "@/lib/category";
 import { getChangelogEntries } from "@/lib/changelog";
 import { getComparisonPages } from "@/lib/compare";
 import { getAllLegalSlugs, getLegalPage } from "@/lib/legal";
@@ -90,6 +93,36 @@ export default function sitemap(): MetadataRoute.Sitemap {
 			priority: 0.8,
 		},
 		{
+			url: `${baseUrl}/mcp-install`,
+			lastModified: new Date(),
+			changeFrequency: "monthly",
+			priority: 0.8,
+		},
+		{
+			url: `${baseUrl}/factory-2026`,
+			lastModified: new Date(),
+			changeFrequency: "monthly",
+			priority: 0.8,
+		},
+		{
+			url: `${baseUrl}/the-production-run`,
+			lastModified: new Date(),
+			changeFrequency: "monthly",
+			priority: 0.8,
+		},
+		{
+			url: `${baseUrl}/leaderboard`,
+			lastModified: new Date(),
+			changeFrequency: "daily",
+			priority: 0.8,
+		},
+		{
+			url: `${baseUrl}/stats`,
+			lastModified: new Date(),
+			changeFrequency: "daily",
+			priority: 0.7,
+		},
+		{
 			url: `${baseUrl}/roadmap`,
 			lastModified: new Date(),
 			changeFrequency: "weekly",
@@ -129,6 +162,15 @@ export default function sitemap(): MetadataRoute.Sitemap {
 		priority: 0.7,
 	}));
 
+	const categoryPages: MetadataRoute.Sitemap = getCategoryPages().map(
+		(page) => ({
+			url: `${baseUrl}${page.url}`,
+			lastModified: new Date(page.lastUpdated || page.date),
+			changeFrequency: "weekly" as const,
+			priority: 0.9,
+		}),
+	);
+
 	const comparisonPages: MetadataRoute.Sitemap = getComparisonPages().map(
 		(page) => ({
 			url: `${baseUrl}/compare/${page.slug}`,
@@ -155,13 +197,32 @@ export default function sitemap(): MetadataRoute.Sitemap {
 		priority: 0.6,
 	}));
 
-	return [
+	const pages = [
 		...staticPages,
 		...blogPages,
 		...changelogPages,
 		...teamPages,
+		...categoryPages,
 		...comparisonPages,
 		...legalPages,
 		...themePages,
 	];
+
+	// Every page exists once per locale (English at the bare URL, others under
+	// /{locale}), and every entry names its siblings via hreflang alternates —
+	// this is what makes the localized tree discoverable to search engines.
+	return pages.flatMap((entry) => {
+		const path = entry.url === baseUrl ? "/" : entry.url.slice(baseUrl.length);
+		const languages: Record<string, string> = {
+			"x-default": localeUrl("en", path),
+		};
+		for (const locale of SUPPORTED_LOCALES) {
+			languages[locale] = localeUrl(locale, path);
+		}
+		return SUPPORTED_LOCALES.map((locale) => ({
+			...entry,
+			url: localeUrl(locale, path),
+			alternates: { languages },
+		}));
+	});
 }

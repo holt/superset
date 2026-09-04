@@ -2,7 +2,10 @@ import * as childProcess from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import path from "node:path";
+import { msg } from "@lingui/core/macro";
+import { i18n } from "@superset/i18n";
 import { organizations, settings } from "@superset/local-db";
 import { getHostId, getHostName } from "@superset/shared/host-info";
 import { eq } from "drizzle-orm";
@@ -12,7 +15,7 @@ import { env as sharedEnv } from "shared/env.shared";
 import { getProcessEnvWithShellPath } from "../../lib/trpc/routers/workspaces/utils/shell-env";
 import { env as mainEnv } from "../env.main";
 import { SUPERSET_HOME_DIR } from "./app-environment";
-import { isInternalBuild } from "./build-channel";
+import { getBrowserBridgeInfo } from "./browser/browser-bridge-info";
 import { acquireSpawnLock } from "./host-service-lock";
 import {
 	isProcessAlive,
@@ -71,6 +74,15 @@ interface HostServiceProcess {
 	port: number;
 	secret: string;
 	status: HostServiceStatus;
+	spawnedAt: number;
+	/** Rolling tail of the child's stdout/stderr, attached to crash reports. */
+	outputTail: string;
+	/**
+	 * Every secret handed to this child. `outputTail` is raw child output, so
+	 * anything the child logs (a request header, an env dump in a stack trace)
+	 * can land in a crash report — strip these before it reaches telemetry.
+	 */
+	redactions: string[];
 	/**
 	 * True when this instance spawned the child and owns its lifecycle (may
 	 * SIGTERM it and remove its manifest). False when the entry was *adopted*
@@ -105,6 +117,46 @@ const START_OR_ADOPT_DEADLINE_MS = SPAWN_LOCK_STALE_MS + HEALTH_POLL_TIMEOUT_MS;
 /** Poll interval while waiting for a peer instance's spawn to go healthy. */
 const ADOPT_WAIT_INTERVAL_MS = 250;
 
+/**
+ * How long a SIGTERMed child gets to exit on its own before SIGKILL. The
+ * child's own shutdown budget (grace + dispose deadline in
+ * `host-service/shutdown.ts`) is ~5s, so this only fires for a child whose
+ * signal handler never ran at all.
+ */
+const STOP_KILL_ESCALATION_MS = 5_000;
+
+/**
+ * Startup reap identity window. `ps` reports process age at 1 s granularity
+ * and the manifest's `startedAt` is written after createApp() (migrations
+ * included), so the process is somewhat older than the manifest, never
+ * younger. A process that started after the manifest cannot have written it.
+ */
+const REAP_IDENTITY_MAX_OLDER_MS = 10 * 60_000;
+const REAP_IDENTITY_MAX_YOUNGER_MS = 60_000;
+
+/** After SIGKILLing a wedged holder, wait this long for its port to free. */
+const REAP_EXIT_WAIT_MS = 1_000;
+const REAP_EXIT_POLL_MS = 25;
+
+/** What `ps` reports for a live pid; null when the pid cannot be inspected. */
+interface ProcessIdentity {
+	elapsedMs: number;
+	command: string;
+}
+
+/**
+ * A Node abort dumps ~5KB of native + JS backtrace on the way down, so a
+ * smaller window would evict the assertion line and every app log before it.
+ */
+const MAX_OUTPUT_TAIL_BYTES = 16_384;
+
+/**
+ * `exit` fires before the child's piped stdio has drained, so the crash report
+ * waits this long for the last output — a native abort message is written on
+ * the way down and would otherwise be missed.
+ */
+const CRASH_REPORT_FLUSH_MS = 500;
+
 // High, uncommon user-space range: above usual web/dev server ports and below
 // macOS's default ephemeral range, while still falling back if occupied.
 const STABLE_PORT_BASE = 48_000;
@@ -130,6 +182,46 @@ function getStablePortForOrganization(organizationId: string): number {
 	return STABLE_PORT_BASE + ((hash >>> 0) % STABLE_PORT_COUNT);
 }
 
+/**
+ * `ps -o etime=,command=` for one pid. Returns null on Windows (no `ps`),
+ * for a pid that is gone, or for output we cannot parse; callers treat null
+ * as "unknown", never as "safe to kill".
+ */
+async function inspectProcessWithPs(
+	pid: number,
+): Promise<ProcessIdentity | null> {
+	if (process.platform === "win32") return null;
+	// Async on purpose: a synchronous subprocess here would stall the whole
+	// main process (every IPC reply queues behind it) for as long as `ps` takes.
+	const stdout = await new Promise<string | null>((resolve) => {
+		childProcess.execFile(
+			"ps",
+			["-o", "etime=,command=", "-p", String(pid)],
+			{ encoding: "utf8", timeout: 2_000 },
+			(error, out) => resolve(error ? null : out),
+		);
+	});
+	if (stdout == null) return null;
+	const line = stdout.trim().split("\n")[0]?.trim();
+	const match = line ? /^(\S+)\s+(.*)$/.exec(line) : null;
+	if (!match) return null;
+	const elapsedMs = parseEtime(match[1] ?? "");
+	if (elapsedMs == null) return null;
+	return { elapsedMs, command: match[2] ?? "" };
+}
+
+/** Parse ps's `[[dd-]hh:]mm:ss` elapsed-time column into milliseconds. */
+export function parseEtime(etime: string): number | null {
+	const match = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(etime.trim());
+	if (!match) return null;
+	const [, days = "0", hours = "0", minutes, seconds] = match;
+	return (
+		(((Number(days) * 24 + Number(hours)) * 60 + Number(minutes)) * 60 +
+			Number(seconds)) *
+		1000
+	);
+}
+
 function isValidPort(port: number | null | undefined): port is number {
 	return (
 		typeof port === "number" &&
@@ -149,11 +241,18 @@ export class HostServiceCoordinator extends EventEmitter {
 	private instances = new Map<string, HostServiceProcess>();
 	private pendingStarts = new Map<string, PendingStart>();
 	private lastKnownPorts = new Map<string, number>();
+	private stableSecrets = new Map<string, string>();
 	private scriptPath = path.join(__dirname, "host-service.js");
 	private machineId = getHostId();
 	private devReloadWatcher: fs.FSWatcher | null = null;
 	private respawns = new Map<string, RespawnState>();
 	private desiredOrganizationIds = new Set<string>();
+	/**
+	 * SIGKILL escalations pending for SIGTERMed children, by pid. Cancelled by
+	 * `handleChildExit` so a pid the kernel has since recycled is never
+	 * signalled.
+	 */
+	private killEscalations = new Map<number, ReturnType<typeof setTimeout>>();
 	private startGeneration = 0;
 	private configProvider: (() => Promise<SpawnConfig | null>) | null = null;
 	/**
@@ -166,6 +265,12 @@ export class HostServiceCoordinator extends EventEmitter {
 		delayMs: number,
 	) => ReturnType<typeof setTimeout> = (run, delayMs) =>
 		setTimeout(run, delayMs);
+	/**
+	 * Seam for the startup reap's identity check. Production shells out to
+	 * `ps`; tests hand back a canned identity for their fake pids.
+	 */
+	private inspectProcess: (pid: number) => Promise<ProcessIdentity | null> =
+		inspectProcessWithPs;
 
 	/**
 	 * Supplies fresh spawn config for automatic respawns. A respawn must not
@@ -271,6 +376,26 @@ export class HostServiceCoordinator extends EventEmitter {
 		this.lastKnownPorts.set(organizationId, port);
 	}
 
+	/**
+	 * One PSK per org for the coordinator's lifetime, seeded from a surviving
+	 * manifest when there is one. Respawns and restarts must reuse it: every
+	 * live client (renderer windows, the CLI, peer app instances) caches this
+	 * secret against the host URL, and rotating it per spawn strands them all
+	 * on auth-rejected redials until their next connection poll — which showed
+	 * up as multi-second "Host unreachable" screens after a restarted service
+	 * was already serving. Stability gives up nothing: the current secret
+	 * already sits on disk in the manifest for adoption, so per-spawn rotation
+	 * never narrowed its exposure.
+	 */
+	private getOrCreateSecret(organizationId: string): string {
+		const existing =
+			this.stableSecrets.get(organizationId) ??
+			readManifest(organizationId)?.authToken;
+		const secret = existing ?? randomBytes(32).toString("hex");
+		this.stableSecrets.set(organizationId, secret);
+		return secret;
+	}
+
 	stop(organizationId: string): void {
 		// Cancel first, and unconditionally: a respawn may be pending with no
 		// instance tracked (the crashed one was already deleted), and quitting or
@@ -289,13 +414,28 @@ export class HostServiceCoordinator extends EventEmitter {
 		// drop our local reference below; never SIGTERM it or remove its manifest.
 		if (instance.owned) {
 			try {
-				if (instance.pid > 0) killProcess(instance.pid, "SIGTERM");
+				if (instance.pid > 0) {
+					killProcess(instance.pid, "SIGTERM");
+					this.scheduleKillEscalation(organizationId, instance.pid);
+				}
 			} catch {}
-			removeManifest(organizationId);
+			this.removeManifestIfHeldBy(organizationId, instance.pid);
 		}
 
 		this.instances.delete(organizationId);
 		this.emitStatus(organizationId, "stopped", previousStatus);
+	}
+
+	/**
+	 * Remove the manifest only when `pid` holds it. Another live instance may
+	 * have claimed it since we spawned; deleting that claim would strand the
+	 * CLI ("host service isn't running") while the claimant still serves. An
+	 * unreadable manifest is left alone too — a torn read of a concurrent
+	 * writer's claim must not read as license to delete.
+	 */
+	private removeManifestIfHeldBy(organizationId: string, pid: number): void {
+		if (readManifest(organizationId)?.pid !== pid) return;
+		removeManifest(organizationId);
 	}
 
 	stopAll(): void {
@@ -572,6 +712,7 @@ export class HostServiceCoordinator extends EventEmitter {
 					// attempt and taking the lock — re-check before spawning.
 					const raced = await this.tryAdopt(organizationId, isStartAllowed);
 					if (raced) return raced;
+					await this.reapWedgedManifestHolder(organizationId);
 					return await this.spawn(
 						organizationId,
 						config,
@@ -632,9 +773,17 @@ export class HostServiceCoordinator extends EventEmitter {
 			port,
 			secret: manifest.authToken,
 			status: "running",
+			spawnedAt: manifest.startedAt,
+			outputTail: "",
+			// Adopted children are owned by another app instance: we never see
+			// their stdio, so outputTail stays empty and this is belt-and-braces.
+			redactions: [manifest.authToken],
 			owned: false,
 		});
 		this.rememberPort(organizationId, port);
+		// A later respawn must keep honoring credentials clients cached against
+		// the adopted instance.
+		this.stableSecrets.set(organizationId, manifest.authToken);
 		this.emitStatus(organizationId, "running", previous?.status ?? null);
 
 		log.info(
@@ -655,13 +804,22 @@ export class HostServiceCoordinator extends EventEmitter {
 		const port = await findFreePort(preferredPorts);
 		if (!isStartAllowed()) throw new Error("Host service start cancelled");
 		this.rememberPort(organizationId, port);
-		const secret = randomBytes(32).toString("hex");
+		const secret = this.getOrCreateSecret(organizationId);
 
 		const instance: HostServiceProcess = {
 			pid: 0,
 			port,
 			secret,
 			status: "starting",
+			spawnedAt: Date.now(),
+			outputTail: "",
+			// Redact every live credential in the child env from crash tails
+			// shipped to Sentry — incl. the browser-bridge secret.
+			redactions: [
+				secret,
+				config.authToken,
+				getBrowserBridgeInfo()?.secret,
+			].filter((value): value is string => Boolean(value)),
 			owned: true,
 		};
 		this.instances.set(organizationId, instance);
@@ -678,34 +836,41 @@ export class HostServiceCoordinator extends EventEmitter {
 			path.join(manifestDir(organizationId), "host-service.log"),
 			MAX_HOST_LOG_BYTES,
 		);
-		// Dev: pipe child stdout/stderr through this process so log lines
-		// land in the developer's `bun dev` terminal. Production: hard-back
-		// stdio with the rotating log file.
+		// Output is piped rather than handing the log fd straight to the child so
+		// the coordinator can keep a tail of it for crash reports; it is written
+		// through to the same rotating log file (and, in dev, to this process's
+		// stdout/stderr) so logging is unchanged.
 		const isDev = !app.isPackaged;
-		const stdio: childProcess.StdioOptions = isDev
-			? ["ignore", "pipe", "pipe"]
-			: logFd >= 0
-				? ["ignore", logFd, logFd]
-				: ["ignore", "ignore", "ignore"];
+		const logStream =
+			logFd >= 0 ? fs.createWriteStream("", { fd: logFd }) : null;
+		// An unhandled stream error would take down the main process; losing log
+		// lines must not.
+		logStream?.on("error", () => {});
 
 		let child: ReturnType<typeof childProcess.spawn>;
 		try {
 			child = childProcess.spawn(process.execPath, [this.scriptPath], {
 				detached: false,
-				stdio,
+				stdio: ["ignore", "pipe", "pipe"],
 				env: childEnv,
 				// Avoid a flashing CMD window on Windows.
 				windowsHide: true,
 			});
-		} finally {
-			if (logFd >= 0) {
-				try {
-					fs.closeSync(logFd);
-				} catch {
-					// Best-effort — child has its own dup of the fd.
-				}
-			}
+		} catch (error) {
+			logStream?.end();
+			throw error;
 		}
+
+		for (const source of [child.stdout, child.stderr]) {
+			source?.on("error", () => {});
+			source?.on("data", (chunk: Buffer) => {
+				instance.outputTail = (
+					instance.outputTail + chunk.toString("utf8")
+				).slice(-MAX_OUTPUT_TAIL_BYTES);
+				logStream?.write(chunk);
+			});
+		}
+		child.once("close", () => logStream?.end());
 
 		// In dev, fan child output through to parent stdout/stderr with a
 		// prefix so it's identifiable in `bun dev`.
@@ -717,6 +882,7 @@ export class HostServiceCoordinator extends EventEmitter {
 
 		const childPid = child.pid;
 		if (!childPid) {
+			logStream?.end();
 			this.instances.delete(organizationId);
 			throw new Error("Failed to spawn host service process");
 		}
@@ -742,7 +908,12 @@ export class HostServiceCoordinator extends EventEmitter {
 			if (this.instances.get(organizationId) === instance) {
 				this.instances.delete(organizationId);
 			}
-			if (!isStartAllowed()) removeManifest(organizationId);
+			// Whether cancelled or failed-to-start, the dying child must not
+			// leave a manifest naming its dead pid (the CLI would report
+			// "manifest is stale" instead of the clean no-manifest path).
+			if (childPid != null) {
+				this.removeManifestIfHeldBy(organizationId, childPid);
+			}
 			throw new Error(
 				!isStartAllowed()
 					? "Host service start cancelled"
@@ -768,6 +939,7 @@ export class HostServiceCoordinator extends EventEmitter {
 		const organizationDir = manifestDir(organizationId);
 		const row = localDb.select().from(settings).get();
 		const exposeViaRelay = row?.exposeHostServiceViaRelay ?? false;
+		const browserBridge = getBrowserBridgeInfo();
 
 		const childEnv = await getProcessEnvWithShellPath({
 			...(process.env as Record<string, string>),
@@ -785,18 +957,32 @@ export class HostServiceCoordinator extends EventEmitter {
 			HOST_MIGRATIONS_FOLDER: app.isPackaged
 				? path.join(process.resourcesPath, "resources/host-migrations")
 				: path.join(app.getAppPath(), "../../packages/host-service/drizzle"),
+			// chat.db's migrations ship the same way host.db's do: the bundled
+			// host-service can't resolve them from its own module path, so the
+			// folder travels as a resource and the path comes in as env.
+			SUPERSET_CHAT_V3_MIGRATIONS: app.isPackaged
+				? path.join(process.resourcesPath, "resources/chat-migrations")
+				: path.join(
+						app.getAppPath(),
+						"../../packages/chat-runtime/src/db/drizzle",
+					),
+			// The Claude Agent SDK's bundled CLI binary is unresolvable from the
+			// bundled host-service (isolated linker + bundling), so its path comes
+			// in as env too. Packaged builds are an open IOU (231MB binary).
+			...(chatV3ClaudeBin()
+				? { SUPERSET_CHAT_V3_CLAUDE_BIN: chatV3ClaudeBin() as string }
+				: {}),
 			DESKTOP_VITE_PORT: String(sharedEnv.DESKTOP_VITE_PORT),
 			SUPERSET_HOME_DIR: SUPERSET_HOME_DIR,
 			SUPERSET_LEGACY_WORKTREE_BASE_DIR: row?.worktreeBaseDir ?? "",
 			SUPERSET_AGENT_HOOK_PORT: String(sharedEnv.DESKTOP_NOTIFICATIONS_PORT),
 			SUPERSET_AGENT_HOOK_VERSION: HOOK_PROTOCOL_VERSION,
+			// BROWSER_BRIDGE_URL/SECRET are set (or stripped) after the shell-env
+			// merge below, alongside RELAY_URL, so an inherited value can't leak
+			// into a standalone host.
 			AUTH_TOKEN: config.authToken,
 			SUPERSET_AUTH_CONFIG_PATH: path.join(SUPERSET_HOME_DIR, "config.json"),
 			SUPERSET_API_URL: config.cloudApiUrl,
-			// Pre-release ACP session harness, internal-channel only: enabled on
-			// canary and dev builds, never on stable. The host gates its router
-			// and WS stream route on this env var.
-			...(isInternalBuild() ? { SUPERSET_ACP_SESSIONS: "1" } : {}),
 			// Namespaced so terminals/agents spawned by the host service don't
 			// inherit a generic SENTRY_DSN — third-party tools with a Sentry SDK
 			// auto-pick it up and report into our project.
@@ -818,11 +1004,22 @@ export class HostServiceCoordinator extends EventEmitter {
 		// effective URL comes from the PostHog `relay-url-override` flag with
 		// `env.RELAY_URL` as fallback (see main/lib/relay-url) so we can A/B-test
 		// alternate relay deployments per-user.
-		const effectiveRelayUrl = await getRelayUrl();
+		const effectiveRelayUrl = getRelayUrl();
 		if (exposeViaRelay && effectiveRelayUrl) {
 			childEnv.RELAY_URL = effectiveRelayUrl;
 		} else {
 			delete childEnv.RELAY_URL;
+		}
+
+		// Same enforce-after-merge for the browser bridge: when this process has
+		// no bridge, strip any inherited BROWSER_BRIDGE_* so the child can't
+		// connect to a stale/unintended bridge from the shell env.
+		if (browserBridge) {
+			childEnv.BROWSER_BRIDGE_URL = browserBridge.endpoint;
+			childEnv.BROWSER_BRIDGE_SECRET = browserBridge.secret;
+		} else {
+			delete childEnv.BROWSER_BRIDGE_URL;
+			delete childEnv.BROWSER_BRIDGE_SECRET;
 		}
 
 		return childEnv;
@@ -859,8 +1056,9 @@ export class HostServiceCoordinator extends EventEmitter {
 		signal: NodeJS.Signals | null,
 	): void {
 		log.info(
-			`[host-service:${organizationId}] exited with code ${code} signal ${signal}`,
+			`[host-service:${organizationId}] pid=${childPid} exited with code ${code} signal ${signal}`,
 		);
+		this.cancelKillEscalation(childPid);
 		const current = this.instances.get(organizationId);
 		if (!current || current.pid !== childPid || current.status === "stopped")
 			return;
@@ -868,7 +1066,7 @@ export class HostServiceCoordinator extends EventEmitter {
 		const previousStatus = current.status;
 		this.rememberPort(organizationId, current.port);
 		this.instances.delete(organizationId);
-		removeManifest(organizationId);
+		this.removeManifestIfHeldBy(organizationId, childPid);
 		this.emitStatus(organizationId, "stopped", previousStatus);
 
 		if (previousStatus !== "running") return;
@@ -880,21 +1078,32 @@ export class HostServiceCoordinator extends EventEmitter {
 		// so the supervisor is the only place these are observable. Imported
 		// lazily: a static @sentry/electron import needs electron APIs the
 		// coordinator tests' stub does not provide.
-		void import("@sentry/electron/main")
-			.then((Sentry) =>
-				Sentry.captureMessage(`host-service crashed (${cause})`, {
-					level: "error",
-					tags: {
-						exit_code: String(code ?? "none"),
-						exit_signal: signal ?? "none",
-					},
-					extra: {
-						organizationId,
-						respawnAttempts: this.respawns.get(organizationId)?.attempts ?? 0,
-					},
-				}),
-			)
-			.catch(() => {});
+		const respawnAttempts = this.respawns.get(organizationId)?.attempts ?? 0;
+		const flushTimer = setTimeout(() => {
+			void import("@sentry/electron/main")
+				.then((Sentry) =>
+					Sentry.captureMessage(`host-service crashed (${cause})`, {
+						level: "error",
+						tags: {
+							exit_code: String(code ?? "none"),
+							exit_signal: signal ?? "none",
+						},
+						extra: {
+							organizationId,
+							respawnAttempts,
+							pid: childPid,
+							version: app.getVersion(),
+							uptimeMs: Date.now() - current.spawnedAt,
+							outputTail: current.redactions.reduce(
+								(tail, secret) => tail.split(secret).join("[redacted]"),
+								current.outputTail,
+							),
+						},
+					}),
+				)
+				.catch(() => {});
+		}, CRASH_REPORT_FLUSH_MS);
+		flushTimer.unref?.();
 		this.scheduleRespawn(organizationId, cause);
 	}
 
@@ -1043,6 +1252,125 @@ export class HostServiceCoordinator extends EventEmitter {
 	}
 
 	/**
+	 * SIGTERM is a request the child can fail to honour: a host-worker wedged
+	 * in native code leaves `process.exit()` blocked joining it, and the child
+	 * then ignores every later SIGTERM. Follow up with SIGKILL after a grace.
+	 * Unref'd on purpose: on quit the parent must not wait around for this,
+	 * and the startup reap in `reapWedgedManifestHolder` covers a child that
+	 * outlives us.
+	 */
+	private scheduleKillEscalation(organizationId: string, pid: number): void {
+		this.cancelKillEscalation(pid);
+		const timer = this.scheduleRespawnTimer(() => {
+			// A cancelled escalation (the child exited, `handleChildExit` ran) is
+			// no longer the registered one; never signal a pid we know is gone.
+			if (this.killEscalations.get(pid) !== timer) return;
+			this.killEscalations.delete(pid);
+			if (!isProcessAlive(pid)) return;
+			log.warn(
+				`[host-service:${organizationId}] pid=${pid} still alive ${STOP_KILL_ESCALATION_MS}ms after SIGTERM; escalating to SIGKILL`,
+			);
+			try {
+				killProcess(pid, "SIGKILL");
+			} catch (error) {
+				log.warn(
+					`[host-service:${organizationId}] SIGKILL of pid=${pid} failed`,
+					error,
+				);
+			}
+		}, STOP_KILL_ESCALATION_MS);
+		timer.unref?.();
+		this.killEscalations.set(pid, timer);
+	}
+
+	private cancelKillEscalation(pid: number): void {
+		const timer = this.killEscalations.get(pid);
+		if (!timer) return;
+		clearTimeout(timer);
+		this.killEscalations.delete(pid);
+	}
+
+	/**
+	 * Kill a manifest holder that is alive but failed the adopt health probe
+	 * before spawning beside it. That holder is a wedged host-service: in
+	 * practice an orphan of a Squirrel auto-update relaunch whose exit hung
+	 * joining a stuck worker. Left alone it keeps the port (the replacement
+	 * ends up on a fallback port) and its pty-daemon subscriptions, which
+	 * freezes those terminals for the replacement too. Runs under the spawn
+	 * lock, right after the under-lock adopt miss, so the probe verdict is
+	 * fresh. A pid started before this boot is skipped: pids recycle across
+	 * reboots, and a pre-boot `startedAt` can name any process at all.
+	 *
+	 * Pids recycle within a boot too, and `kill(pid, 0)` only proves *a*
+	 * process exists. So before SIGKILL the live process must look like the
+	 * host-service that wrote the manifest: our script on its command line and
+	 * an age consistent with `startedAt`. Anything else, including a pid `ps`
+	 * cannot inspect, is left alone.
+	 */
+	private async reapWedgedManifestHolder(
+		organizationId: string,
+	): Promise<void> {
+		const manifest = readManifest(organizationId);
+		if (!manifest || !isProcessAlive(manifest.pid)) return;
+		// tryAdopt() returns null without probing when the endpoint is
+		// unparsable; only a probed miss is evidence of a wedge.
+		let port: number | null = null;
+		try {
+			port = Number(new URL(manifest.endpoint).port);
+		} catch {}
+		if (!isValidPort(port)) return;
+		const bootedAt = Date.now() - os.uptime() * 1000;
+		if (manifest.startedAt < bootedAt) return;
+
+		const identity = await this.inspectProcess(manifest.pid);
+		const processStartedAt =
+			identity == null ? null : Date.now() - identity.elapsedMs;
+		const looksLikeHolder =
+			identity != null &&
+			processStartedAt != null &&
+			identity.command.includes(path.basename(this.scriptPath)) &&
+			processStartedAt >= manifest.startedAt - REAP_IDENTITY_MAX_OLDER_MS &&
+			processStartedAt <= manifest.startedAt + REAP_IDENTITY_MAX_YOUNGER_MS;
+		if (!looksLikeHolder) {
+			log.warn(
+				`[host-service:${organizationId}] manifest pid=${manifest.pid} is alive but unhealthy and does not look like the host-service that wrote the manifest (${identity ? `"${identity.command}", age ${Math.round(identity.elapsedMs / 1000)}s` : "not inspectable"}); leaving it alone`,
+			);
+			return;
+		}
+
+		log.warn(
+			`[host-service:${organizationId}] manifest pid=${manifest.pid} at ${manifest.endpoint} is alive but unhealthy; SIGKILLing it before spawning`,
+		);
+		try {
+			killProcess(manifest.pid, "SIGKILL");
+		} catch (error) {
+			log.warn(
+				`[host-service:${organizationId}] reap: SIGKILL of pid=${manifest.pid} failed`,
+				error,
+			);
+		}
+		// SIGKILL is asynchronous: give the kernel a moment to tear the process
+		// down so spawn()'s findFreePort sees its preferred port free instead
+		// of falling back to a random one.
+		const exited = await this.waitForExit(manifest.pid, REAP_EXIT_WAIT_MS);
+		if (!exited) {
+			log.warn(
+				`[host-service:${organizationId}] reap: pid=${manifest.pid} still alive ${REAP_EXIT_WAIT_MS}ms after SIGKILL`,
+			);
+		}
+		this.removeManifestIfHeldBy(organizationId, manifest.pid);
+	}
+
+	private async waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (isProcessAlive(pid)) {
+			if (Date.now() >= deadline) return false;
+			await new Promise((r) => setTimeout(r, REAP_EXIT_POLL_MS));
+		}
+		return true;
+	}
+
+	/**
 	 * Alert on a crash we could not recover from. Recovery is the existing
 	 * tray > Host Service > Restart. Async on purpose: a synchronous error box
 	 * blocks the main process until dismissed.
@@ -1051,10 +1379,32 @@ export class HostServiceCoordinator extends EventEmitter {
 		const orgName = this.getOrganizationName(organizationId);
 		void dialog.showMessageBox({
 			type: "error",
-			title: "Host service crashed",
-			message: `The Superset host service${orgName ? ` for ${orgName}` : ""} stopped unexpectedly (${cause}) and could not be restarted automatically.`,
-			detail:
-				"Its workspaces and terminals are unavailable until it restarts — use the Superset tray menu > Host Service > Restart.",
+			title: i18n._(
+				msg({
+					message: "Host service crashed",
+				}),
+			),
+			message: orgName
+				? i18n._({
+						...msg({
+							message:
+								"The Superset host service for {organization} stopped unexpectedly ({cause}) and could not be restarted automatically.",
+						}),
+						values: { organization: orgName, cause },
+					})
+				: i18n._({
+						...msg({
+							message:
+								"The Superset host service stopped unexpectedly ({cause}) and could not be restarted automatically.",
+						}),
+						values: { cause },
+					}),
+			detail: i18n._(
+				msg({
+					message:
+						"Its workspaces and terminals are unavailable until it restarts — use the Superset tray menu > Host Service > Restart.",
+				}),
+			),
 		});
 	}
 
@@ -1106,4 +1456,24 @@ export function getHostServiceCoordinator(): HostServiceCoordinator {
 		coordinator = new HostServiceCoordinator();
 	}
 	return coordinator;
+}
+
+function chatV3ClaudeBin(): string | undefined {
+	if (app.isPackaged) return undefined;
+	const arch = process.arch;
+	const platform = process.platform;
+	const store = path.join(app.getAppPath(), "../../node_modules/.bun");
+	const prefix = `@anthropic-ai+claude-agent-sdk-${platform}-${arch}@`;
+	try {
+		const entry = fs.readdirSync(store).find((d) => d.startsWith(prefix));
+		if (!entry) return undefined;
+		const bin = path.join(
+			store,
+			entry,
+			`node_modules/@anthropic-ai/claude-agent-sdk-${platform}-${arch}/claude`,
+		);
+		return fs.existsSync(bin) ? bin : undefined;
+	} catch {
+		return undefined;
+	}
 }

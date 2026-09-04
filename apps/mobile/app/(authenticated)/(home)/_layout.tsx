@@ -1,6 +1,9 @@
+import { useLingui } from "@lingui/react/macro";
 import { Stack } from "expo-router";
 
 export default function HomeLayout() {
+	const { t } = useLingui();
+
 	return (
 		<Stack
 			screenOptions={{
@@ -9,6 +12,15 @@ export default function HomeLayout() {
 			}}
 		>
 			<Stack.Screen name="index" options={{ title: "" }} />
+			<Stack.Screen
+				name="search"
+				options={{
+					presentation: "formSheet",
+					title: t({ message: "Search" }),
+					sheetAllowedDetents: [1.0],
+					sheetGrabberVisible: true,
+				}}
+			/>
 			<Stack.Screen
 				name="filter"
 				options={{
@@ -19,22 +31,22 @@ export default function HomeLayout() {
 				}}
 			/>
 			<Stack.Screen
-				name="new-chat"
+				name="organizations"
+				options={{
+					presentation: "formSheet",
+					sheetAllowedDetents: [0.5],
+					sheetGrabberVisible: true,
+					title: t({
+						message: "Organizations",
+					}),
+				}}
+			/>
+			<Stack.Screen
+				name="new-session"
 				options={{
 					presentation: "formSheet",
 					headerShown: false,
 					sheetAllowedDetents: [1.0],
-					sheetGrabberVisible: true,
-				}}
-			/>
-			<Stack.Screen
-				name="attachments"
-				options={{
-					presentation: "formSheet",
-					headerShown: false,
-					// Single detent: multi-detent resizes corrupt expo-image frames.
-					// Content (incl. the screenshots grid) is sized to fit 0.5.
-					sheetAllowedDetents: [0.5],
 					sheetGrabberVisible: true,
 				}}
 			/>

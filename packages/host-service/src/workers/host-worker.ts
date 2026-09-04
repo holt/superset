@@ -5,8 +5,12 @@
 import { parentPort } from "node:worker_threads";
 import type { WorkerTaskDefinition } from "./define-worker-task.ts";
 import { gitTasks } from "./tasks/git.ts";
+import { usageTasks } from "./tasks/usage.ts";
+import { killAndReapTrackedChildren } from "./worker-child-tracker.ts";
 import {
+	isWorkerShutdownRequestMessage,
 	serializeWorkerError,
+	type WorkerTaskPhaseMessage,
 	type WorkerTaskRequestMessage,
 } from "./worker-task-protocol.ts";
 
@@ -16,7 +20,7 @@ if (!parentPort) {
 
 // biome-ignore lint/suspicious/noExplicitAny: heterogenous task registry; typing is enforced at the defineWorkerTask/run() boundary
 const registry = new Map<string, WorkerTaskDefinition<any, unknown>>();
-for (const def of [...gitTasks]) {
+for (const def of [...gitTasks, ...usageTasks]) {
 	if (registry.has(def.type)) {
 		throw new Error(`duplicate worker task type: ${def.type}`);
 	}
@@ -38,6 +42,13 @@ function isWorkerTaskRequestMessage(
 }
 
 parentPort.on("message", async (message: unknown) => {
+	if (isWorkerShutdownRequestMessage(message)) {
+		// Cooperative retirement (WorkerTaskRunner.shutdownSlot): reap in-flight
+		// children first — a plain terminate() would strand them as zombies —
+		// then end this thread (process.exit in a worker stops only the thread).
+		await killAndReapTrackedChildren();
+		process.exit(0);
+	}
 	if (!isWorkerTaskRequestMessage(message)) return;
 	const task = message;
 
@@ -46,7 +57,14 @@ parentPort.on("message", async (message: unknown) => {
 		if (!def) {
 			throw new Error(`unknown worker task type: ${task.taskType}`);
 		}
-		const result = await def.handler(task.payload);
+		const result = await def.handler(task.payload, (phase) => {
+			const phaseMessage: WorkerTaskPhaseMessage = {
+				kind: "phase",
+				taskId: task.taskId,
+				phase,
+			};
+			parentPort?.postMessage(phaseMessage);
+		});
 		parentPort?.postMessage({
 			kind: "result",
 			taskId: task.taskId,

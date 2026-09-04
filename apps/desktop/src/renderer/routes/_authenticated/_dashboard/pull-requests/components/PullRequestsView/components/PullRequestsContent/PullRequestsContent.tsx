@@ -1,189 +1,162 @@
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
-import { useInfiniteQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef } from "react";
 import { GoGitPullRequest } from "react-icons/go";
-import { HiOutlineArrowTopRightOnSquare } from "react-icons/hi2";
-import { LuMinus, LuPlus, LuRefreshCw } from "react-icons/lu";
-import { useHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
+import { LuRefreshCw } from "react-icons/lu";
 import { useDebouncedValue } from "renderer/hooks/useDebouncedValue";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
-import { shouldKeepWorkItemsPlaceholder } from "renderer/routes/_authenticated/_dashboard/utils/shouldKeepWorkItemsPlaceholder";
-import {
-	normalizePRState,
-	PRIcon,
-} from "renderer/screens/main/components/PRIcon";
-import {
-	type LinkedPR,
-	useNewWorkspaceDraftStore,
-} from "renderer/stores/new-workspace-draft";
-import { useOpenNewWorkspaceModal } from "renderer/stores/new-workspace-modal";
+import { LoadMoreSentinel } from "renderer/routes/_authenticated/_dashboard/components/LoadMoreSentinel";
+import { serializeProjectFilters } from "renderer/routes/_authenticated/_dashboard/components/ProjectFilter/project-filter-utils";
+import type { ProjectQueryTarget } from "renderer/routes/_authenticated/_dashboard/hooks/useProjectQueryTargets";
+import { useWorkItemsList } from "renderer/routes/_authenticated/_dashboard/hooks/useWorkItemsList";
+import { usePullRequestsSplitViewStore } from "renderer/routes/_authenticated/_dashboard/pull-requests/stores/pullRequestsSplitViewStore";
+import type { PullRequestReviewFilter } from "renderer/routes/_authenticated/_dashboard/pull-requests/utils/pullRequestReviewFilter";
+import { PullRequestRow } from "../PullRequestRow";
 
 interface PullRequestsContentProps {
-	projectFilter: string | null;
-	hostId: string | null;
+	projectFilters: string[];
+	projectTargets: ProjectQueryTarget[];
 	areProjectsReady: boolean;
 	hasProjects: boolean;
 	searchQuery: string;
+	authorFilter: string | null;
+	reviewFilter: PullRequestReviewFilter | null;
 	includeClosed: boolean;
-	onCollapse?: () => void;
+	mergedOnly: boolean;
+	selectedPrNumber: number | null;
+	selectedPrProjectId: string | null;
+	repoSlugByProjectId: Map<string, string>;
 }
 
 const PAGE_SIZE = 30;
 
 export function PullRequestsContent({
-	projectFilter,
-	hostId,
+	projectFilters,
+	projectTargets,
 	areProjectsReady,
 	hasProjects,
 	searchQuery,
+	authorFilter,
+	reviewFilter,
 	includeClosed,
-	onCollapse,
+	mergedOnly,
+	selectedPrNumber,
+	selectedPrProjectId,
+	repoSlugByProjectId,
 }: PullRequestsContentProps) {
+	const { t } = useLingui();
 	const debouncedQuery = useDebouncedValue(searchQuery, 300);
-	const hostUrl = useHostUrl(hostId ?? undefined);
 	const navigate = useNavigate();
-	const updateDraft = useNewWorkspaceDraftStore((s) => s.updateDraft);
-	const resetDraft = useNewWorkspaceDraftStore((s) => s.resetDraft);
-	const openModal = useOpenNewWorkspaceModal();
+	const expandDetail = usePullRequestsSplitViewStore((s) => s.expandDetail);
 
 	const {
-		data,
+		rows: pullRequests,
+		totalCount,
+		repoMismatch,
 		isFetching,
 		isFetchingNextPage,
-		fetchNextPage,
 		hasNextPage,
 		error,
 		refetch,
-	} = useInfiniteQuery({
-		queryKey: [
-			"pullRequests",
-			"searchPullRequests",
-			projectFilter,
-			hostUrl,
-			debouncedQuery.trim(),
-			includeClosed,
-		],
-		queryFn: async ({ pageParam }) => {
-			if (!hostUrl || !projectFilter) {
-				return {
-					pullRequests: [],
-					totalCount: 0,
-					hasNextPage: false,
-					page: pageParam,
-				};
-			}
-			const client = getHostServiceClientByUrl(hostUrl);
-			return client.workspaceCreation.searchPullRequests.query({
-				projectId: projectFilter,
-				query: debouncedQuery.trim() || undefined,
-				limit: PAGE_SIZE,
+		scrollRef,
+		sentinelRef,
+	} = useWorkItemsList({
+		projectTargets,
+		resetKey: `${debouncedQuery.trim()}\0${authorFilter ?? ""}\0${reviewFilter ?? ""}\0${includeClosed}\0${mergedOnly}`,
+		getQueryOptions: ({ target, page }) => ({
+			queryKey: [
+				"pullRequests",
+				"searchPullRequests",
+				target.key,
+				target.hostUrl,
+				debouncedQuery.trim(),
+				authorFilter,
+				reviewFilter,
 				includeClosed,
-				page: pageParam,
-			});
-		},
-		initialPageParam: 1,
-		getNextPageParam: (lastPage) =>
-			lastPage.hasNextPage ? lastPage.page + 1 : undefined,
-		staleTime: 30_000,
-		gcTime: 10 * 60_000,
-		placeholderData: (previousData, previousQuery) => {
-			return shouldKeepWorkItemsPlaceholder(
-				previousQuery?.queryKey,
-				projectFilter,
-				hostUrl,
-			)
-				? previousData
-				: undefined;
-		},
-		enabled: !!projectFilter && !!hostUrl,
-		retry: false,
+				mergedOnly,
+				page,
+			],
+			queryFn: async () => {
+				const firstProject = target.projects[0];
+				if (!target.hostUrl || !firstProject) return null;
+				const client = getHostServiceClientByUrl(target.hostUrl);
+				const result = await client.workspaceCreation.searchPullRequests.query({
+					projectId: firstProject.projectId,
+					projectIds: target.projects.map((project) => project.projectId),
+					query: debouncedQuery.trim() || undefined,
+					author: authorFilter ?? undefined,
+					review: reviewFilter ?? undefined,
+					limit: PAGE_SIZE,
+					includeClosed,
+					mergedOnly,
+					page,
+				});
+				// The router types come from this build, the rows come from
+				// whichever host-service the host actually runs — hosts update
+				// independently and the list is not version-gated. Rows only
+				// gained `checks` in host-service 1.20.0, so an older host
+				// answers without it. Absent checks read as "none reported".
+				return {
+					...result,
+					pullRequests: result.pullRequests.map((pullRequest) => ({
+						...pullRequest,
+						checks: pullRequest.checks ?? [],
+					})),
+				};
+			},
+			enabled: !!target.hostUrl,
+			staleTime: 30_000,
+			gcTime: 10 * 60_000,
+		}),
+		getRows: (data) => data.pullRequests,
+		getRowKey: (pullRequest) =>
+			`${pullRequest.projectId}:${pullRequest.prNumber}`,
 	});
 
-	const pullRequests = useMemo(
-		() => data?.pages.flatMap((p) => p.pullRequests) ?? [],
-		[data],
-	);
-	const totalCount = data?.pages[0]?.totalCount ?? 0;
-	const repoMismatch = useMemo(() => {
-		const first = data?.pages[0];
-		return first && "repoMismatch" in first ? first.repoMismatch : null;
-	}, [data]);
-
-	const scrollRef = useRef<HTMLDivElement>(null);
-	const sentinelRef = useRef<HTMLDivElement>(null);
-	useEffect(() => {
-		const el = sentinelRef.current;
-		const root = scrollRef.current;
-		if (!el || !root || !hasNextPage || isFetchingNextPage) return;
-		const observer = new IntersectionObserver(
-			(entries) => {
-				if (entries[0]?.isIntersecting) fetchNextPage();
-			},
-			{ root, rootMargin: "200px" },
-		);
-		observer.observe(el);
-		return () => observer.disconnect();
-	}, [hasNextPage, isFetchingNextPage, fetchNextPage]);
-
-	const handleAddToWorkspace = (pr: (typeof pullRequests)[number]) => {
-		if (!projectFilter) return;
-		const linkedPR: LinkedPR = {
-			prNumber: pr.prNumber,
-			title: pr.title,
-			url: pr.url,
-			state: normalizePRState(pr.state, pr.isDraft),
-		};
-		resetDraft();
-		updateDraft({
-			selectedProjectId: projectFilter,
-			hostId,
-			linkedPR,
-		});
-		openModal(projectFilter);
-	};
-
-	const handleOpenUrl = (url: string) => {
-		window.open(url, "_blank", "noopener,noreferrer");
-	};
-
-	const handleOpenPreview = (prNumber: number) => {
-		if (!projectFilter) return;
+	const handleOpenPreview = (pr: (typeof pullRequests)[number]) => {
+		expandDetail();
 		navigate({
 			to: "/pull-requests/$prNumber",
-			params: { prNumber: String(prNumber) },
+			params: { prNumber: String(pr.prNumber) },
 			search: {
 				search: searchQuery || undefined,
-				project: projectFilter,
-				state: includeClosed ? "all" : undefined,
+				project: pr.projectId,
+				projects: serializeProjectFilters(projectFilters),
+				author: authorFilter ?? undefined,
+				review: reviewFilter ?? undefined,
+				state: mergedOnly ? "merged" : includeClosed ? "all" : undefined,
 			},
 		});
 	};
 
-	if (!projectFilter) {
+	if (projectTargets.length === 0) {
 		return (
 			<div className="flex h-full items-center justify-center p-8">
 				<div className="flex flex-col items-center gap-2 text-muted-foreground text-center">
 					<GoGitPullRequest className="h-8 w-8" />
 					<span className="max-w-prose text-sm text-wrap-pretty">
-						{areProjectsReady
-							? hasProjects
-								? "Select a project to see pull requests."
-								: "Add a project to see pull requests."
-							: "Loading projects…"}
+						{areProjectsReady ? (
+							hasProjects ? (
+								<Trans>Select a project to see pull requests.</Trans>
+							) : (
+								<Trans>Add a project to see pull requests.</Trans>
+							)
+						) : (
+							<Trans>Loading projects…</Trans>
+						)}
 					</span>
 				</div>
 			</div>
 		);
 	}
 
-	if (!hostId || !hostUrl) {
+	if (projectTargets.every((target) => !target.hostUrl)) {
 		return (
 			<div className="flex h-full items-center justify-center p-8">
 				<div className="flex max-w-prose flex-col items-center gap-2 text-center text-muted-foreground">
 					<GoGitPullRequest className="size-8" />
 					<span className="text-sm text-wrap-pretty">
-						The device that hosts this project is unavailable.
+						<Trans>The device that hosts this project is unavailable.</Trans>
 					</span>
 				</div>
 			</div>
@@ -191,12 +164,12 @@ export function PullRequestsContent({
 	}
 
 	const isInitialLoad = isFetching && pullRequests.length === 0;
-	const countLabel = isInitialLoad
-		? "Loading…"
-		: totalCount === 0
-			? "0"
-			: `${pullRequests.length} of ${totalCount}`;
-
+	// Without a project to disambiguate, only the first row sharing this PR
+	// number gets marked selected — distinct repos can reuse the same number.
+	const firstMatchingPrIndex =
+		selectedPrProjectId == null
+			? pullRequests.findIndex((pr) => pr.prNumber === selectedPrNumber)
+			: -1;
 	return (
 		<div
 			className="@container flex h-full flex-col overflow-hidden"
@@ -205,15 +178,29 @@ export function PullRequestsContent({
 			<div className="flex items-center gap-2 px-4 py-2 border-b bg-muted/30 shrink-0">
 				<GoGitPullRequest className="size-3.5 text-muted-foreground" />
 				<span className="text-xs text-muted-foreground" aria-live="polite">
-					<span className="tabular-nums">{countLabel}</span>{" "}
-					{totalCount === 1 ? "pull request" : "pull requests"}
+					<span className="tabular-nums">
+						{isInitialLoad ? (
+							<Trans>Loading…</Trans>
+						) : totalCount === 0 ? (
+							"0"
+						) : (
+							<Trans>
+								{pullRequests.length} of {totalCount}
+							</Trans>
+						)}
+					</span>{" "}
+					<Plural value={totalCount} one="pull request" other="pull requests" />
 				</span>
 				<Button
 					variant="ghost"
 					size="icon-xs"
 					className="ml-auto"
-					title="Refresh"
-					aria-label="Refresh pull requests"
+					title={t({
+						message: "Refresh",
+					})}
+					aria-label={t({
+						message: "Refresh pull requests",
+					})}
 					disabled={isFetching}
 					onClick={() => refetch()}
 				>
@@ -225,117 +212,76 @@ export function PullRequestsContent({
 						}
 					/>
 				</Button>
-				{onCollapse && (
-					<Button
-						variant="ghost"
-						size="icon-xs"
-						title="Minimize"
-						aria-label="Minimize pull requests"
-						onClick={onCollapse}
-					>
-						<LuMinus className="size-3.5" />
-					</Button>
-				)}
 			</div>
 
 			<div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto">
-				{error instanceof Error ? (
+				{error instanceof Error && pullRequests.length === 0 ? (
 					<div className="flex flex-col items-start gap-3 px-4 py-4 text-sm text-destructive select-text cursor-text">
 						<span>{error.message}</span>
 						<Button variant="outline" size="sm" onClick={() => refetch()}>
-							Try again
+							<Trans>Try again</Trans>
 						</Button>
 					</div>
 				) : repoMismatch ? (
 					<div className="px-4 py-3 text-sm text-muted-foreground select-text cursor-text">
-						PR URL must match {repoMismatch}.
+						<Trans>PR URL must match {repoMismatch}.</Trans>
 					</div>
 				) : isInitialLoad ? (
 					<div className="flex h-full items-center justify-center gap-2 p-8 text-muted-foreground">
 						<LuRefreshCw className="size-4 animate-spin motion-reduce:animate-none" />
-						<span className="text-sm">Loading pull requests…</span>
+						<span className="text-sm">
+							<Trans>Loading pull requests…</Trans>
+						</span>
 					</div>
 				) : totalCount === 0 && !isFetching ? (
 					<div className="flex h-full items-center justify-center p-8">
 						<span className="text-sm text-muted-foreground">
-							{includeClosed
-								? "No pull requests found."
-								: "No open pull requests."}
+							{mergedOnly ? (
+								<Trans>No merged pull requests.</Trans>
+							) : includeClosed ? (
+								<Trans>No pull requests found.</Trans>
+							) : (
+								<Trans>No open pull requests.</Trans>
+							)}
 						</span>
 					</div>
 				) : (
-					<div className="flex flex-col">
-						{pullRequests.map((pr) => {
-							const state = normalizePRState(pr.state, pr.isDraft);
-							return (
-								// biome-ignore lint/a11y/useSemanticElements: row contains nested action buttons, so the outer element is a div with role/tabIndex
-								<div
-									key={pr.prNumber}
-									className="group flex h-9 cursor-pointer items-center gap-3 border-b border-border/50 px-4 hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
-									onClick={() => handleOpenPreview(pr.prNumber)}
-									onKeyDown={(e) => {
-										if (e.target !== e.currentTarget) return;
-										if (e.key === "Enter" || e.key === " ") {
-											e.preventDefault();
-											handleOpenPreview(pr.prNumber);
-										}
-									}}
-									role="button"
-									tabIndex={0}
-								>
-									<PRIcon state={state} className="size-4 shrink-0" />
-									<span className="shrink-0 font-mono text-xs text-muted-foreground tabular-nums">
-										#{pr.prNumber}
-									</span>
-									<span className="min-w-0 flex-1 truncate text-sm font-medium">
-										{pr.title}
-									</span>
-									{pr.authorLogin && (
-										<span className="hidden shrink-0 text-xs text-muted-foreground @md:inline">
-											{pr.authorLogin}
-										</span>
-									)}
-									<div className="flex items-center gap-1">
-										<Button
-											variant="ghost"
-											size="icon-xs"
-											title="Open in browser"
-											aria-label={`Open pull request #${pr.prNumber} in browser`}
-											onClick={(e) => {
-												e.stopPropagation();
-												handleOpenUrl(pr.url);
-											}}
-										>
-											<HiOutlineArrowTopRightOnSquare className="size-3.5" />
-										</Button>
-										<Button
-											variant="outline"
-											size="sm"
-											title="Add to workspace"
-											aria-label={`Add pull request #${pr.prNumber} to workspace`}
-											className="h-7 gap-1.5 px-2 text-xs"
-											onClick={(e) => {
-												e.stopPropagation();
-												handleAddToWorkspace(pr);
-											}}
-										>
-											<LuPlus className="size-3.5" />
-											<span className="hidden @lg:inline">
-												Add to workspace
-											</span>
-										</Button>
-									</div>
-								</div>
-							);
-						})}
-						{hasNextPage && (
-							<div
-								ref={sentinelRef}
-								className="flex items-center justify-center py-3 text-xs text-muted-foreground"
-							>
-								{isFetchingNextPage ? "Loading more…" : ""}
+					<div className="flex flex-col gap-1.5 p-2">
+						{error instanceof Error && (
+							<div className="flex items-center gap-2 rounded-lg bg-destructive/5 px-4 py-2 text-xs text-destructive">
+								<span className="min-w-0 flex-1 truncate select-text cursor-text">
+									<Trans>
+										Some repositories could not be loaded: {error.message}
+									</Trans>
+								</span>
+								<Button variant="outline" size="xs" onClick={() => refetch()}>
+									<Trans>Retry</Trans>
+								</Button>
 							</div>
 						)}
+						{pullRequests.map((pr, index) => {
+							const rowKey = `${pr.projectId}:${pr.prNumber}`;
+							const isSelected =
+								selectedPrNumber === pr.prNumber &&
+								(selectedPrProjectId != null
+									? selectedPrProjectId === pr.projectId
+									: firstMatchingPrIndex === index);
+							const repoSlug = repoSlugByProjectId.get(pr.projectId);
+							return (
+								<PullRequestRow
+									key={rowKey}
+									pr={pr}
+									repoSlug={repoSlug}
+									isSelected={isSelected}
+									onClick={() => handleOpenPreview(pr)}
+								/>
+							);
+						})}
+						<LoadMoreSentinel
+							sentinelRef={sentinelRef}
+							hasNextPage={hasNextPage}
+							isFetchingNextPage={isFetchingNextPage}
+						/>
 					</div>
 				)}
 			</div>

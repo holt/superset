@@ -1,3 +1,4 @@
+import { Trans } from "@lingui/react/macro";
 import {
 	PromptInputProvider,
 	usePromptInputController,
@@ -11,10 +12,12 @@ import {
 } from "@superset/ui/dialog";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
+import { newWorkspaceAttachmentsStore } from "renderer/stores/new-workspace-attachments";
 import {
 	useCloseNewWorkspaceModal,
 	useNewWorkspaceModalOpen,
 	usePreSelectedProjectId,
+	usePreSelectedSession,
 } from "renderer/stores/new-workspace-modal";
 import { DashboardNewWorkspaceModalContent } from "./components/DashboardNewWorkspaceModalContent";
 import {
@@ -44,6 +47,7 @@ export function DashboardNewWorkspaceModal() {
 	const isOpen = useNewWorkspaceModalOpen();
 	const closeModal = useCloseNewWorkspaceModal();
 	const preSelectedProjectId = usePreSelectedProjectId();
+	const preSelectedSession = usePreSelectedSession();
 	const navigate = useNavigate();
 	const variant = useNewWorkspaceScreenVariant(isOpen);
 	const isScreen = variant === "test";
@@ -55,18 +59,27 @@ export function DashboardNewWorkspaceModal() {
 		closeModal();
 		void navigate({
 			to: "/new-workspace",
-			search: preSelectedProjectId
-				? { projectId: preSelectedProjectId }
-				: undefined,
+			search: preSelectedSession
+				? { session: true }
+				: preSelectedProjectId
+					? { projectId: preSelectedProjectId }
+					: undefined,
 		});
-	}, [isScreen, isOpen, closeModal, navigate, preSelectedProjectId]);
+	}, [
+		isScreen,
+		isOpen,
+		closeModal,
+		navigate,
+		preSelectedProjectId,
+		preSelectedSession,
+	]);
 
 	if (isOpen && variant === null) return null;
 	if (isScreen) return null;
 
 	return (
 		<DashboardNewWorkspaceDraftProvider onClose={closeModal}>
-			<PromptInputProvider>
+			<PromptInputProvider attachmentsStore={newWorkspaceAttachmentsStore}>
 				<PromptInputResetSync />
 				<Dialog
 					modal
@@ -74,8 +87,12 @@ export function DashboardNewWorkspaceModal() {
 					onOpenChange={(open) => !open && closeModal()}
 				>
 					<DialogHeader className="sr-only">
-						<DialogTitle>New Workspace</DialogTitle>
-						<DialogDescription>Create a new workspace</DialogDescription>
+						<DialogTitle>
+							<Trans>New Workspace</Trans>
+						</DialogTitle>
+						<DialogDescription>
+							<Trans>Create a new workspace</Trans>
+						</DialogDescription>
 					</DialogHeader>
 					<DialogContent
 						showCloseButton={false}
@@ -85,6 +102,7 @@ export function DashboardNewWorkspaceModal() {
 						<DashboardNewWorkspaceModalContent
 							isOpen={isOpen}
 							preSelectedProjectId={preSelectedProjectId}
+							preSelectedSession={preSelectedSession}
 						/>
 					</DialogContent>
 				</Dialog>

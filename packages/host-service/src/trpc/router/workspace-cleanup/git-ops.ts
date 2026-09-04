@@ -44,7 +44,11 @@ export const cleanupGitOps = {
 	},
 
 	readWorktreeState(
-		input: { worktreePath: string; gitEnv: GitTaskEnv },
+		input: {
+			worktreePath: string;
+			gitEnv: GitTaskEnv;
+			ignoreInitialCommit?: boolean;
+		},
 		signal?: AbortSignal,
 	): Promise<{ hasChanges: boolean; hasUnpushedCommits: boolean }> {
 		return getHostWorkerPool().run(gitWorktreeStateTask, input, {
@@ -57,7 +61,7 @@ export const cleanupGitOps = {
 		repoPath: string;
 		worktreePath: string;
 		gitEnv: GitTaskEnv;
-	}): Promise<{ stillRegistered: boolean }> {
+	}): Promise<{ stillRegistered: boolean; removeError?: string }> {
 		// Generous timeout: removal recursively deletes the worktree
 		// directory, which can take a while for large trees (node_modules
 		// etc.).

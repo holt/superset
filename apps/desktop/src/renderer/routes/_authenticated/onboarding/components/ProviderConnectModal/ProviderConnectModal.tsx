@@ -1,4 +1,5 @@
-import { chatServiceTrpc } from "@superset/chat-legacy/client";
+import { errorMessage } from "@superset/i18n/errors";
+import { chatServiceTrpc } from "@superset/provider-auth/client";
 import { Button } from "@superset/ui/button";
 import {
 	Dialog,
@@ -11,10 +12,10 @@ import { Input } from "@superset/ui/input";
 import { toast } from "@superset/ui/sonner";
 import { type FormEvent, useState } from "react";
 import { LuKeyRound } from "react-icons/lu";
-import { AnthropicOAuthDialog } from "renderer/components/Chat/ChatInterface/components/ModelPicker/components/AnthropicOAuthDialog";
-import { OpenAIOAuthDialog } from "renderer/components/Chat/ChatInterface/components/ModelPicker/components/OpenAIOAuthDialog";
-import { useAnthropicOAuth } from "renderer/components/Chat/ChatInterface/components/ModelPicker/hooks/useAnthropicOAuth";
-import { useOpenAIOAuth } from "renderer/components/Chat/ChatInterface/components/ModelPicker/hooks/useOpenAIOAuth";
+import { AnthropicOAuthDialog } from "renderer/components/ProviderAuth/components/AnthropicOAuthDialog";
+import { OpenAIOAuthDialog } from "renderer/components/ProviderAuth/components/OpenAIOAuthDialog";
+import { useAnthropicOAuth } from "renderer/components/ProviderAuth/hooks/useAnthropicOAuth";
+import { useOpenAIOAuth } from "renderer/components/ProviderAuth/hooks/useOpenAIOAuth";
 import { track } from "renderer/lib/analytics";
 
 export type Provider = "anthropic" | "openai";
@@ -195,9 +196,7 @@ function ConnectDialogShell({
 		try {
 			await onApiKeySubmit(trimmed);
 		} catch (err) {
-			toast.error(
-				err instanceof Error ? err.message : "Failed to save the API key.",
-			);
+			toast.error(errorMessage(err, "Failed to save the API key."));
 		} finally {
 			setSubmitting(false);
 		}

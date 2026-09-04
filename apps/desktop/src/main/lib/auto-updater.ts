@@ -1,11 +1,16 @@
 import { EventEmitter } from "node:events";
+import { statfsSync } from "node:fs";
+import { msg } from "@lingui/core/macro";
 import * as Sentry from "@sentry/electron/main";
+import { i18n } from "@superset/i18n";
 import { app, dialog } from "electron";
 import log from "electron-log/main";
 import { autoUpdater, type UpdateCheckResult } from "electron-updater";
 import { env } from "main/env.main";
 import { setSkipQuitConfirmation } from "main/index";
 import { appState } from "main/lib/app-state";
+import { isEnvironmentUpdateError } from "main/lib/update-error-classification";
+import { redactUpdateError } from "main/lib/update-error-redaction";
 import { gte, prerelease } from "semver";
 import {
 	AUTO_UPDATE_STATUS,
@@ -83,31 +88,16 @@ function isNetworkError(error: Error | string): boolean {
 	return SILENT_ERROR_PATTERNS.some((pattern) => message.includes(pattern));
 }
 
-const ENVIRONMENT_ERRNO_CODES = [
-	"ENOENT",
-	"EACCES",
-	"EPERM",
-	"EBUSY",
-	"ENOSPC",
-];
-const UPDATER_PATH_MARKERS = ["-updater", "shipit"];
-
-// Update failures owned by the user's machine, not by us: a corrupt or
-// half-removed updater cache, an app bundle that can't be written, and stalled
-// requests. Squirrel and electron-updater surface these as plain messages
-// without errno properties, so match on the text.
-function isEnvironmentUpdateError(message: string): boolean {
-	const lowerMessage = message.toLowerCase();
-	if (
-		lowerMessage.includes("read-only volume") ||
-		lowerMessage.includes("the request timed out")
-	) {
-		return true;
+// Free bytes on the volume backing the updater caches, which sit beside our app
+// data. Returns null when the volume can't be queried, so an unknown answer
+// never reads as "out of space".
+function freeStagingBytes(): number | null {
+	try {
+		const { bavail, bsize } = statfsSync(app.getPath("userData"));
+		return bavail * bsize;
+	} catch {
+		return null;
 	}
-	return (
-		ENVIRONMENT_ERRNO_CODES.some((code) => message.includes(`${code}:`)) &&
-		UPDATER_PATH_MARKERS.some((marker) => lowerMessage.includes(marker))
-	);
 }
 
 // electron-updater starts the auto-download inside checkForUpdates and hands
@@ -223,16 +213,24 @@ export function checkForUpdatesInteractive(): void {
 	if (env.NODE_ENV === "development") {
 		dialog.showMessageBox({
 			type: "info",
-			title: "Updates",
-			message: "Auto-updates are disabled in development mode.",
+			title: i18n._(msg({ message: "Updates" })),
+			message: i18n._(
+				msg({
+					message: "Auto-updates are disabled in development mode.",
+				}),
+			),
 		});
 		return;
 	}
 	if (!IS_AUTO_UPDATE_PLATFORM) {
 		dialog.showMessageBox({
 			type: "info",
-			title: "Updates",
-			message: "Auto-updates are only available on macOS and Linux.",
+			title: i18n._(msg({ message: "Updates" })),
+			message: i18n._(
+				msg({
+					message: "Auto-updates are only available on macOS and Linux.",
+				}),
+			),
 		});
 		return;
 	}
@@ -251,9 +249,22 @@ export function checkForUpdatesInteractive(): void {
 				emitStatus(AUTO_UPDATE_STATUS.IDLE);
 				dialog.showMessageBox({
 					type: "info",
-					title: "No Updates",
-					message: "You're up to date!",
-					detail: `Version ${app.getVersion()} is the latest version.`,
+					title: i18n._(
+						msg({
+							message: "No Updates",
+						}),
+					),
+					message: i18n._(
+						msg({
+							message: "You're up to date!",
+						}),
+					),
+					detail: i18n._({
+						...msg({
+							message: "Version {version} is the latest version.",
+						}),
+						values: { version: app.getVersion() },
+					}),
 				});
 			}
 		})
@@ -263,9 +274,17 @@ export function checkForUpdatesInteractive(): void {
 				emitStatus(AUTO_UPDATE_STATUS.IDLE);
 				dialog.showMessageBox({
 					type: "info",
-					title: "No Internet Connection",
-					message:
-						"Unable to check for updates. Please check your internet connection.",
+					title: i18n._(
+						msg({
+							message: "No Internet Connection",
+						}),
+					),
+					message: i18n._(
+						msg({
+							message:
+								"Unable to check for updates. Please check your internet connection.",
+						}),
+					),
 				});
 				return;
 			}
@@ -273,8 +292,16 @@ export function checkForUpdatesInteractive(): void {
 			emitStatus(AUTO_UPDATE_STATUS.ERROR, undefined, error.message);
 			dialog.showMessageBox({
 				type: "error",
-				title: "Update Error",
-				message: "Failed to check for updates. Please try again later.",
+				title: i18n._(
+					msg({
+						message: "Update Error",
+					}),
+				),
+				message: i18n._(
+					msg({
+						message: "Failed to check for updates. Please try again later.",
+					}),
+				),
 			});
 		});
 }
@@ -376,8 +403,13 @@ export function setupAutoUpdater(): void {
 		);
 		void clearCachedUpdate(`error: ${error?.message ?? "unknown"}`);
 		emitStatus(AUTO_UPDATE_STATUS.ERROR, undefined, error.message);
-		if (!isEnvironmentUpdateError(error?.message ?? String(error))) {
-			Sentry.captureException(error);
+		if (
+			!isEnvironmentUpdateError(
+				error?.message ?? String(error),
+				freeStagingBytes(),
+			)
+		) {
+			Sentry.captureException(redactUpdateError(error));
 		}
 	});
 

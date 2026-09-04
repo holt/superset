@@ -1,3 +1,4 @@
+import { errorMessage, rawErrorMessage } from "@superset/i18n/errors";
 import { Button } from "@superset/ui/button";
 import { Card } from "@superset/ui/card";
 import { Input } from "@superset/ui/input";
@@ -10,6 +11,7 @@ import {
 	LuGitBranch,
 	LuLayoutTemplate,
 } from "react-icons/lu";
+import { showStarNagOnboardingToast } from "renderer/components/StarNagToast";
 import { useIsV2CloudEnabled } from "renderer/hooks/useIsV2CloudEnabled";
 import { track } from "renderer/lib/analytics";
 import { apiTrpcClient } from "renderer/lib/api-trpc-client";
@@ -45,16 +47,16 @@ const GH_AUTH_FAILURE_PATTERNS = [
 ];
 
 function toCloneError(err: unknown): CloneError {
-	const message =
-		err instanceof Error ? err.message : "Failed to clone repository";
-	if (message.includes("Permission denied (publickey)")) {
+	const message = errorMessage(err, "Failed to clone repository");
+	const raw = rawErrorMessage(err);
+	if (raw.includes("Permission denied (publickey)")) {
 		return {
 			message:
 				"SSH authentication failed — sign in to GitHub CLI and use the HTTPS URL instead.",
 			needsGhAuth: true,
 		};
 	}
-	if (GH_AUTH_FAILURE_PATTERNS.some((pattern) => message.includes(pattern))) {
+	if (GH_AUTH_FAILURE_PATTERNS.some((pattern) => raw.includes(pattern))) {
 		return {
 			message:
 				"Couldn't access this repository — if it's private, sign in to GitHub CLI first.",
@@ -103,6 +105,9 @@ function OnboardingProjectPage() {
 			toast.error("Could not finish onboarding. Please try again.");
 			return;
 		}
+		// Fires at most once, and only if the user isn't already muted/in
+		// cooldown — see useStarNagStore.isEligible().
+		showStarNagOnboardingToast();
 		if (isV2CloudEnabled) {
 			// Land on the dashboard first, then open the modal. Opening it in the
 			// same tick as navigate mounts the Dialog mid-route-transition, which
@@ -139,7 +144,7 @@ function OnboardingProjectPage() {
 			const project = await openProject.openFromPath(picked.path);
 			if (project) await finish(project.id);
 		} catch (err) {
-			toast.error(err instanceof Error ? err.message : "Failed to open folder");
+			toast.error(errorMessage(err, "Failed to open folder"));
 		} finally {
 			setBusy(false);
 		}

@@ -1,3 +1,6 @@
+import { plural } from "@lingui/core/macro";
+import { Plural, Trans, useLingui } from "@lingui/react/macro";
+import { errorMessage } from "@superset/i18n/errors";
 import { Button } from "@superset/ui/button";
 import {
 	Command,
@@ -22,9 +25,9 @@ import { useWorkspaceHostOptions } from "renderer/routes/_authenticated/componen
 import { useSelectedHostProjectIds } from "renderer/routes/_authenticated/components/DashboardNewWorkspaceModal/components/DashboardNewWorkspaceModalContent/hooks/useSelectedHostProjectIds";
 import { ProjectThumbnail } from "renderer/routes/_authenticated/components/ProjectThumbnail";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
+import { deriveBranchName } from "renderer/routes/_authenticated/utils/deriveBranchName";
 import { useV2WorkspaceCreateDefaultsStore } from "renderer/stores/v2-workspace-create-defaults";
 import { useWorkspaceCreates } from "renderer/stores/workspace-creates";
-import { deriveBranchName } from "../../../../../../$taskId/utils/deriveBranchName";
 import type { SelectedIssue } from "../../../GitHubIssuesContent";
 
 const AGENT_STORAGE_KEY = "lastSelectedV2IssueBatchAgent";
@@ -56,6 +59,7 @@ export function RunIssuesInWorkspacePopover({
 	projectFilter,
 	onComplete,
 }: RunIssuesInWorkspacePopoverProps) {
+	const { t } = useLingui();
 	const hostService = useLocalHostService();
 	const { machineId, activeHostUrl } = hostService;
 	const { otherHosts } = useWorkspaceHostOptions();
@@ -141,27 +145,64 @@ export function RunIssuesInWorkspacePopover({
 	const [open, setOpen] = useState(false);
 	const [projectPickerOpen, setProjectPickerOpen] = useState(false);
 
+	// Workspaces launch against one project; a mixed-repo selection would
+	// silently run every issue against a single repository.
+	const issueProjectIds = useMemo(
+		() => new Set(issues.map((issue) => issue.projectId)),
+		[issues],
+	);
+
+	const hasMixedRepos = issueProjectIds.size > 1;
+
 	const submitBlocker = useMemo<string | null>(() => {
-		if (!selectedProjectId) return "Select a project";
-		if (!hostId) return "No active host";
+		if (hasMixedRepos) {
+			return t({
+				message:
+					"Selected issues span multiple repositories. Select issues from a single repository to run them.",
+			});
+		}
+		if (!selectedProjectId)
+			return t({
+				message: "Select a project",
+			});
+		if (!hostId)
+			return t({
+				message: "No active host",
+			});
 		if (hostId !== machineId) {
 			const remote = otherHosts.find((host) => host.id === hostId);
-			if (!remote?.isOnline) return "Host is offline";
+			if (!remote?.isOnline)
+				return t({
+					message: "Host is offline",
+				});
 		} else if (!activeHostUrl) {
-			return "Host service is not running";
+			return t({
+				message: "Host service is not running",
+			});
 		}
-		if (setUpProjectIds === null) return "Checking host…";
+		if (setUpProjectIds === null)
+			return t({
+				message: "Checking host…",
+			});
 		if (selectedProject?.needsSetup === true) {
-			return "Project not set up on this host";
+			return t({
+				message: "Project not set up on this host",
+			});
 		}
 		if (selectedAgent !== NONE) {
-			if (!v2AgentsFetched) return "Checking agents…";
+			if (!v2AgentsFetched)
+				return t({
+					message: "Checking agents…",
+				});
 			if (!validAgentIds.has(selectedAgent)) {
-				return "Selected agent is not available on this host";
+				return t({
+					message: "Selected agent is not available on this host",
+				});
 			}
 		}
 		return null;
 	}, [
+		hasMixedRepos,
 		selectedProjectId,
 		selectedProject?.needsSetup,
 		setUpProjectIds,
@@ -172,6 +213,7 @@ export function RunIssuesInWorkspacePopover({
 		machineId,
 		otherHosts,
 		activeHostUrl,
+		t,
 	]);
 
 	const handleRun = () => {
@@ -179,7 +221,7 @@ export function RunIssuesInWorkspacePopover({
 		if (submitBlocker) {
 			if (hostId === machineId && !activeHostUrl) {
 				showHostServiceUnavailableToast(hostService, {
-					action: "run issues in workspaces",
+					action: "runIssuesInWorkspaces",
 				});
 			} else {
 				toast.error(submitBlocker);
@@ -229,9 +271,20 @@ export function RunIssuesInWorkspacePopover({
 		);
 
 		toast.promise(promise, {
-			loading: `Creating ${issues.length} workspace${issues.length === 1 ? "" : "s"}...`,
-			success: (count) => `Created ${count} workspace${count === 1 ? "" : "s"}`,
-			error: (err) => (err instanceof Error ? err.message : String(err)),
+			loading: t({
+				message: plural(issues.length, {
+					one: "Creating # workspace...",
+					other: "Creating # workspaces...",
+				}),
+			}),
+			success: (count) =>
+				t({
+					message: plural(count, {
+						one: "Created # workspace",
+						other: "Created # workspaces",
+					}),
+				}),
+			error: (err) => errorMessage(err),
 		});
 
 		setOpen(false);
@@ -247,7 +300,7 @@ export function RunIssuesInWorkspacePopover({
 					className="h-7 text-xs gap-1.5 bg-muted/50"
 				>
 					<HiMiniPlay className="size-3" />
-					Run in Workspace
+					<Trans>Run in Workspace</Trans>
 				</Button>
 			</PopoverTrigger>
 			<PopoverContent align="start" className="w-72 p-0">
@@ -280,7 +333,7 @@ export function RunIssuesInWorkspacePopover({
 										</>
 									) : (
 										<span className="text-muted-foreground">
-											Select project
+											<Trans>Select project</Trans>
 										</span>
 									)}
 								</span>
@@ -289,9 +342,15 @@ export function RunIssuesInWorkspacePopover({
 						</PopoverTrigger>
 						<PopoverContent align="start" className="w-60 p-0">
 							<Command>
-								<CommandInput placeholder="Search projects..." />
+								<CommandInput
+									placeholder={t({
+										message: "Search projects...",
+									})}
+								/>
 								<CommandList>
-									<CommandEmpty>No projects found.</CommandEmpty>
+									<CommandEmpty>
+										<Trans>No projects found.</Trans>
+									</CommandEmpty>
 									<CommandGroup>
 										{recentProjects.map((project) => (
 											<CommandItem
@@ -311,7 +370,7 @@ export function RunIssuesInWorkspacePopover({
 												<span className="flex-1 truncate">{project.name}</span>
 												{project.needsSetup === true && (
 													<span className="text-[10px] text-amber-500">
-														not set up
+														<Trans>not set up</Trans>
 													</span>
 												)}
 												{project.id === selectedProjectId && (
@@ -328,24 +387,38 @@ export function RunIssuesInWorkspacePopover({
 					<AgentSelect<SelectedAgent>
 						agents={v2Agents}
 						value={selectedAgent}
-						placeholder="Select agent"
+						placeholder={t({
+							message: "Select agent",
+						})}
 						onValueChange={setSelectedAgent}
 						onBeforeConfigureAgents={() => setOpen(false)}
 						triggerClassName="h-8 text-xs w-full border-0 shadow-none bg-muted/50 rounded-md"
 						allowNone
-						noneLabel="No agent"
+						noneLabel={t({
+							message: "No agent",
+						})}
 						noneValue={NONE}
 					/>
 				</div>
 
 				<div className="border-t border-border p-2">
+					{hasMixedRepos && (
+						<p className="mb-2 text-xs text-muted-foreground text-wrap-pretty">
+							{submitBlocker}
+						</p>
+					)}
 					<Button
 						size="sm"
 						className="w-full h-8"
 						disabled={!!submitBlocker}
+						title={submitBlocker ?? undefined}
 						onClick={handleRun}
 					>
-						Run {issues.length} Workspace{issues.length === 1 ? "" : "s"}
+						<Plural
+							value={issues.length}
+							one="Run # Workspace"
+							other="Run # Workspaces"
+						/>
 					</Button>
 				</div>
 			</PopoverContent>

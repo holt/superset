@@ -1,3 +1,4 @@
+import { useLingui } from "@lingui/react/macro";
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { resolveProjectIconUrl } from "renderer/hooks/host-projects/resolveProjectIconUrl";
@@ -5,6 +6,7 @@ import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
 import { useIsV2CloudEnabled } from "renderer/hooks/useIsV2CloudEnabled";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { ProjectThumbnail } from "renderer/routes/_authenticated/components/ProjectThumbnail";
+import { PROJECT_COLOR_DEFAULT } from "shared/constants/project-colors";
 import {
 	type SettingsListGroup,
 	SettingsListSidebar,
@@ -16,6 +18,7 @@ interface ProjectRow {
 	id: string;
 	name: string;
 	iconUrl: string | null;
+	color: string | null;
 }
 
 interface ProjectsSettingsSidebarProps {
@@ -25,6 +28,7 @@ interface ProjectsSettingsSidebarProps {
 export function ProjectsSettingsSidebar({
 	selectedProjectId,
 }: ProjectsSettingsSidebarProps) {
+	const { t } = useLingui();
 	const isV2CloudEnabled = useIsV2CloudEnabled();
 	const { data: groups = [] } =
 		electronTrpc.workspaces.getAllGrouped.useQuery();
@@ -37,6 +41,7 @@ export function ProjectsSettingsSidebar({
 				id: project.projectKey,
 				name: project.name,
 				iconUrl: resolveProjectIconUrl(project),
+				color: project.color,
 			})),
 		[hostProjects],
 	);
@@ -48,6 +53,7 @@ export function ProjectsSettingsSidebar({
 				id: p.id,
 				name: p.name,
 				iconUrl: p.iconUrl ?? null,
+				color: p.color,
 			}));
 			return [{ id: "v2", title: "v2", rows: v2Rows }];
 		}
@@ -57,20 +63,31 @@ export function ProjectsSettingsSidebar({
 			id: g.project.id,
 			name: g.project.name,
 			iconUrl: g.project.iconUrl,
+			color: g.project.color === PROJECT_COLOR_DEFAULT ? null : g.project.color,
 		}));
 		return [{ id: "v1", title: "v1", rows: v1Rows }];
 	}, [groups, v2Projects, isV2CloudEnabled]);
 
 	return (
 		<SettingsListSidebar
-			searchPlaceholder="Filter projects..."
-			searchAriaLabel="Filter projects"
+			searchPlaceholder={t({
+				message: "Filter projects...",
+			})}
+			searchAriaLabel={t({
+				message: "Filter projects",
+			})}
 			hideFilterWhenEmpty
 			groups={listGroups}
 			filterRow={(row, q) => row.name.toLowerCase().includes(q.toLowerCase())}
 			getRowKey={(row) => `${row.kind}:${row.id}`}
-			emptyLabel="No projects yet."
-			noMatchLabel={(q) => `No projects match "${q}".`}
+			emptyLabel={t({
+				message: "No projects yet.",
+			})}
+			noMatchLabel={(q) =>
+				t({
+					message: `No projects match "${q}".`,
+				})
+			}
 			renderRow={(row) => (
 				<Link
 					to="/settings/projects/$projectId"
@@ -83,6 +100,7 @@ export function ProjectsSettingsSidebar({
 					<ProjectThumbnail
 						projectName={row.name}
 						iconUrl={row.iconUrl}
+						color={row.color}
 						className="size-5"
 					/>
 					<span className="truncate">{row.name}</span>

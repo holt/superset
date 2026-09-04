@@ -1,3 +1,7 @@
+import type { MessageDescriptor } from "@lingui/core";
+import { msg } from "@lingui/core/macro";
+import { Trans, useLingui } from "@lingui/react/macro";
+import { i18n } from "@superset/i18n";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
 import {
@@ -9,7 +13,9 @@ import {
 	useRef,
 } from "react";
 import { HiCheck, HiMiniMinus, HiMiniXMark } from "react-icons/hi2";
+import { WorkspaceNameMarquee } from "renderer/components/WorkspaceNameMarquee";
 import type { DiffStats } from "renderer/hooks/host-service/useDiffStats";
+import { useFocusVisible } from "renderer/hooks/useFocusVisible";
 import { HotkeyLabel } from "renderer/hotkeys";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { ProjectThumbnail } from "renderer/routes/_authenticated/components/ProjectThumbnail";
@@ -17,6 +23,7 @@ import { RenameInput } from "renderer/screens/main/components/WorkspaceSidebar/R
 import type { ActivePaneStatus } from "shared/tabs-types";
 import type {
 	DashboardSidebarWorkspace,
+	DashboardSidebarWorkspaceIndentation,
 	DashboardSidebarWorkspacePullRequest,
 } from "../../../../types";
 import { DashboardSidebarWorkspaceDiffStats } from "../DashboardSidebarWorkspaceDiffStats";
@@ -25,13 +32,24 @@ import { DashboardSidebarWorkspaceChips } from "./components/DashboardSidebarWor
 
 const PR_STATE_LABEL: Record<
 	DashboardSidebarWorkspacePullRequest["state"],
-	string
+	MessageDescriptor
 > = {
-	open: "Open",
-	merged: "Merged",
-	closed: "Closed",
-	draft: "Draft",
-	queued: "Queued",
+	open: msg({
+		message: "Open",
+		context: "status",
+	}),
+	merged: msg({
+		message: "Merged",
+	}),
+	closed: msg({
+		message: "Closed",
+	}),
+	draft: msg({
+		message: "Draft",
+	}),
+	queued: msg({
+		message: "Queued",
+	}),
 };
 
 interface DashboardSidebarExpandedWorkspaceRowProps
@@ -44,10 +62,12 @@ interface DashboardSidebarExpandedWorkspaceRowProps
 	diffStats: DiffStats | null;
 	workspaceStatus?: ActivePaneStatus | null;
 	isInSection?: boolean;
+	indentation?: DashboardSidebarWorkspaceIndentation;
 	isBulkSelectable?: boolean;
 	isSelected?: boolean;
 	/** Present when rendered in the Pinned section: shows the project avatar. */
-	pinnedContext?: { projectName: string; projectIconUrl: string | null };
+	/** projectName is null for pinned project-less "session" workspaces. */
+	pinnedContext?: { projectName: string | null; projectIconUrl: string | null };
 	onClick?: MouseEventHandler<HTMLDivElement>;
 	onKeyboardActivate?: KeyboardEventHandler<HTMLDivElement>;
 	onWorkspaceChipsClick?: MouseEventHandler<HTMLDivElement>;
@@ -73,6 +93,7 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 			diffStats,
 			workspaceStatus = null,
 			isInSection = false,
+			indentation,
 			isBulkSelectable = false,
 			isSelected = false,
 			pinnedContext,
@@ -90,6 +111,9 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 		},
 		ref,
 	) => {
+		const { t } = useLingui();
+		const resolvedIndentation =
+			indentation ?? (isInSection ? "grouped" : "workspace");
 		const {
 			hostType,
 			hostIsOnline,
@@ -101,6 +125,13 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 		const isPending = pendingTransaction?.type === "insert";
 		const localRef = useRef<HTMLDivElement>(null);
 		const openUrl = electronTrpc.external.openUrl.useMutation();
+		// Drives the name's hover-reveal for keyboard users: the row, not the
+		// name span, is what's actually tabbable.
+		const {
+			isFocusVisible: isFocused,
+			onFocus: handleRowFocus,
+			onBlur: handleRowBlur,
+		} = useFocusVisible();
 
 		useEffect(() => {
 			if (isActive) {
@@ -161,14 +192,20 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 						}
 					}}
 					onDoubleClick={onDoubleClick}
+					onFocus={handleRowFocus}
+					onBlur={handleRowBlur}
 					className={cn(
-						"group relative flex w-full items-center py-1.5 pr-2",
-						isInSection ? "pl-8" : "pl-3",
+						"group relative flex h-7 w-full items-center pr-2",
+						resolvedIndentation === "top-level"
+							? "pl-2"
+							: resolvedIndentation === "grouped"
+								? "pl-10"
+								: "pl-6",
 						onClick && "cursor-pointer",
 					)}
 				>
 					{isSelected ? (
-						<span className="mr-2.5 flex size-5 shrink-0 items-center justify-center text-foreground">
+						<span className="mr-2 flex size-4 shrink-0 items-center justify-center text-foreground">
 							<HiCheck className="size-3.5" />
 						</span>
 					) : (
@@ -186,8 +223,10 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 												event.stopPropagation();
 											}
 										}}
-										aria-label={`Open pull request #${pullRequest.number}`}
-										className="relative mr-2.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded hover:bg-foreground/10"
+										aria-label={t({
+											message: `Open pull request #${pullRequest.number}`,
+										})}
+										className="relative mr-2 flex size-4 shrink-0 cursor-pointer items-center justify-center rounded hover:bg-foreground/10"
 									>
 										<DashboardSidebarWorkspaceIcon
 											hostType={hostType}
@@ -201,7 +240,7 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 										/>
 									</button>
 								) : (
-									<div className="relative mr-2.5 flex size-5 shrink-0 items-center justify-center">
+									<div className="relative mr-2 flex size-4 shrink-0 items-center justify-center">
 										<DashboardSidebarWorkspaceIcon
 											hostType={hostType}
 											workspaceType={workspace.type}
@@ -219,36 +258,48 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 								{pullRequest ? (
 									<>
 										<p className="text-xs font-medium">
-											PR #{pullRequest.number} —{" "}
-											{PR_STATE_LABEL[pullRequest.state]}
+											<Trans>
+												PR #{pullRequest.number} —{" "}
+												{i18n._(PR_STATE_LABEL[pullRequest.state])}
+											</Trans>
 										</p>
 										<p className="text-xs text-muted-foreground">
-											Click to open on GitHub
+											<Trans>Click to open on GitHub</Trans>
 										</p>
 									</>
 								) : (
 									<>
 										<p className="text-xs font-medium">
-											{isMainWorkspace
-												? workspaceKindTitle
-												: hostType === "local-device"
-													? "Local workspace"
-													: hostType === "remote-device"
-														? hostIsOnline === false
-															? "Remote workspace — device offline"
-															: "Remote workspace"
-														: "Cloud workspace"}
+											{isMainWorkspace ? (
+												workspaceKindTitle
+											) : hostType === "local-device" ? (
+												<Trans>Local workspace</Trans>
+											) : hostType === "remote-device" ? (
+												hostIsOnline === false ? (
+													<Trans>Remote workspace — device offline</Trans>
+												) : (
+													<Trans>Remote workspace</Trans>
+												)
+											) : (
+												<Trans>Cloud workspace</Trans>
+											)}
 										</p>
 										<p className="text-xs text-muted-foreground">
-											{isMainWorkspace
-												? workspaceKindDescription
-												: hostType === "local-device"
-													? "Running on this device"
-													: hostType === "remote-device"
-														? hostIsOnline === false
-															? "The associated device isn't reachable right now"
-															: "Running on a paired device"
-														: "Hosted in the cloud"}
+											{isMainWorkspace ? (
+												workspaceKindDescription
+											) : hostType === "local-device" ? (
+												<Trans>Running on this device</Trans>
+											) : hostType === "remote-device" ? (
+												hostIsOnline === false ? (
+													<Trans>
+														The associated device isn't reachable right now
+													</Trans>
+												) : (
+													<Trans>Running on a paired device</Trans>
+												)
+											) : (
+												<Trans>Hosted in the cloud</Trans>
+											)}
 										</p>
 									</>
 								)}
@@ -261,14 +312,22 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 							<TooltipTrigger asChild>
 								<div className="mr-1.5 flex shrink-0 items-center">
 									<ProjectThumbnail
-										projectName={pinnedContext.projectName}
+										projectName={
+											pinnedContext.projectName ??
+											t({
+												message: "Session",
+											})
+										}
 										iconUrl={pinnedContext.projectIconUrl}
 										className="size-3.5 text-[8px]"
 									/>
 								</div>
 							</TooltipTrigger>
 							<TooltipContent side="right" sideOffset={8}>
-								{pinnedContext.projectName}
+								{pinnedContext.projectName ??
+									t({
+										message: "Session",
+									})}
 							</TooltipContent>
 						</Tooltip>
 					)}
@@ -285,17 +344,23 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 								)}
 							/>
 						) : (
-							<span
-								className={cn(
-									"truncate text-[13px] leading-tight transition-colors",
-									isActive || isSelected
-										? "text-foreground"
-										: "text-foreground/80",
+							<>
+								<WorkspaceNameMarquee
+									name={name || branch}
+									forceActive={isFocused}
+									className={cn(
+										"text-[13px] leading-tight transition-colors",
+										isActive || isSelected
+											? "text-foreground"
+											: "text-foreground/80",
+									)}
+								/>
+								{isSelected && (
+									<span className="sr-only">
+										<Trans>, selected</Trans>
+									</span>
 								)}
-							>
-								{name || branch}
-								{isSelected && <span className="sr-only">, selected</span>}
-							</span>
+							</>
 						)}
 
 						<div className="col-start-2 row-start-1 grid h-5 shrink-0 items-center justify-items-end [&>*]:col-start-1 [&>*]:row-start-1">
@@ -340,13 +405,19 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 														}
 													}}
 													className="flex items-center justify-center text-muted-foreground hover:text-foreground"
-													aria-label="Remove from sidebar"
+													aria-label={t({
+														message: "Remove from sidebar",
+													})}
 												>
 													<HiMiniMinus className="size-3.5" />
 												</button>
 											</TooltipTrigger>
 											<TooltipContent side="top">
-												<HotkeyLabel label="Remove from sidebar" />
+												<HotkeyLabel
+													label={t({
+														message: "Remove from sidebar",
+													})}
+												/>
 											</TooltipContent>
 										</Tooltip>
 									) : (
@@ -368,14 +439,18 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 														}
 													}}
 													className="flex items-center justify-center text-muted-foreground hover:text-foreground"
-													aria-label="Close workspace"
+													aria-label={t({
+														message: "Close workspace",
+													})}
 												>
 													<HiMiniXMark className="size-3.5" />
 												</button>
 											</TooltipTrigger>
 											<TooltipContent side="top">
 												<HotkeyLabel
-													label="Close workspace"
+													label={t({
+														message: "Close workspace",
+													})}
 													id={isActive ? "CLOSE_WORKSPACE" : undefined}
 												/>
 											</TooltipContent>
@@ -390,6 +465,7 @@ export const DashboardSidebarExpandedWorkspaceRow = forwardRef<
 					<DashboardSidebarWorkspaceChips
 						workspaceId={workspace.id}
 						isInSection={isInSection}
+						indentation={resolvedIndentation}
 						onClick={onWorkspaceChipsClick}
 					/>
 				)}

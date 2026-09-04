@@ -1,21 +1,22 @@
+import { Trans } from "@lingui/react/macro";
 import { createFileRoute } from "@tanstack/react-router";
-import { PullRequestsView } from "./components/PullRequestsView";
-import { Route as PullRequestsLayoutRoute } from "./layout";
+import { GoGitPullRequest } from "react-icons/go";
 
 export const Route = createFileRoute(
 	"/_authenticated/_dashboard/pull-requests/",
 )({
-	component: PullRequestsPage,
+	component: PullRequestsIndexPage,
 });
 
-function PullRequestsPage() {
-	const { search, project, state } = PullRequestsLayoutRoute.useSearch();
-
+function PullRequestsIndexPage() {
 	return (
-		<PullRequestsView
-			initialSearch={search}
-			initialProject={project}
-			initialState={state}
-		/>
+		<div className="flex h-full flex-1 items-center justify-center p-8">
+			<div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
+				<GoGitPullRequest className="size-8" />
+				<span className="max-w-prose text-sm text-wrap-pretty">
+					<Trans>Select a pull request to preview it here.</Trans>
+				</span>
+			</div>
+		</div>
 	);
 }

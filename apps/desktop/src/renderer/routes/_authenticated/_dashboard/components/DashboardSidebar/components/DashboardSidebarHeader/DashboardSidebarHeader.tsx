@@ -1,3 +1,5 @@
+import { Trans, useLingui } from "@lingui/react/macro";
+import { FEATURE_FLAGS } from "@superset/shared/constants";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -8,10 +10,18 @@ import { toast } from "@superset/ui/sonner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
 import { useMatchRoute, useNavigate } from "@tanstack/react-router";
+import { useFeatureFlagEnabled } from "posthog-js/react";
 import { useRef } from "react";
 import { GoGitPullRequest } from "react-icons/go";
 import { HiOutlineClipboardDocumentList } from "react-icons/hi2";
-import { LuClock, LuLayers, LuPlus, LuSearch } from "react-icons/lu";
+import {
+	LuClock,
+	LuFileText,
+	LuLayers,
+	LuPlus,
+	LuPuzzle,
+	LuSearch,
+} from "react-icons/lu";
 import {
 	VscFolderOpened,
 	VscGithubAlt,
@@ -22,12 +32,14 @@ import { useFrameStackStore } from "renderer/commandPalette";
 import { GATED_FEATURES, usePaywall } from "renderer/components/Paywall";
 import { SidebarKbdHint } from "renderer/components/SidebarKbdHint";
 import { ZoomStable } from "renderer/components/ZoomStable";
+import { env } from "renderer/env.renderer";
 import { useZoomFactor } from "renderer/hooks/useZoomFactor";
 import { useHotkeyDisplay } from "renderer/hotkeys";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import { useFolderFirstImport } from "renderer/routes/_authenticated/_dashboard/components/AddRepositoryModals/hooks/useFolderFirstImport";
 import { NavigationControls } from "renderer/routes/_authenticated/_dashboard/components/NavigationControls";
 import { SidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/SidebarToggle";
+import { TopBarPortsDropdown } from "renderer/routes/_authenticated/_dashboard/components/TopBar/components/TopBarPortsDropdown";
 import { useFailedAutomations } from "renderer/routes/_authenticated/_dashboard/hooks/useFailedAutomations";
 import {
 	pullRequestsSearchFromFilters,
@@ -37,6 +49,7 @@ import {
 	tasksSearchFromFilters,
 	useTasksFilterStore,
 } from "renderer/routes/_authenticated/_dashboard/tasks/stores/tasks-filter-state";
+import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 import { STROKE_WIDTH_THICK } from "renderer/screens/main/components/WorkspaceSidebar/constants";
 import {
 	useOpenEmptyProjectModal,
@@ -52,6 +65,7 @@ interface DashboardSidebarHeaderProps {
 export function DashboardSidebarHeader({
 	isCollapsed = false,
 }: DashboardSidebarHeaderProps) {
+	const { t } = useLingui();
 	const openModal = useOpenNewWorkspaceModal();
 	const openEmptyProject = useOpenEmptyProjectModal();
 	const openNewProject = useOpenNewProjectModal();
@@ -59,23 +73,40 @@ export function DashboardSidebarHeader({
 	const navigate = useNavigate();
 	const folderImport = useFolderFirstImport({
 		onError: (message) => {
-			toast.error(`Import failed: ${message}`);
+			toast.error(
+				t({
+					message: `Import failed: ${message}`,
+				}),
+			);
 		},
 		onMultipleProjects: ({ candidates }) => {
-			toast.error("Import failed", {
-				description: `Multiple projects use this repository (${candidates.length}). Choose the project in settings to set it up on this device.`,
-				action: {
-					label: "Open Projects",
-					onClick: () => navigate({ to: "/settings/projects" }),
+			toast.error(
+				t({
+					message: "Import failed",
+				}),
+				{
+					description: t({
+						message: `Multiple projects use this repository (${candidates.length}). Choose the project in settings to set it up on this device.`,
+					}),
+					action: {
+						label: t({
+							message: "Open Projects",
+						}),
+						onClick: () => navigate({ to: "/settings/projects" }),
+					},
 				},
-			});
+			);
 		},
 	});
 
 	const handleImportFolder = async () => {
 		const result = await folderImport.start();
 		if (result) {
-			toast.success("Project ready — open it from the sidebar.");
+			toast.success(
+				t({
+					message: "Project ready — open it from the sidebar.",
+				}),
+			);
 		}
 	};
 
@@ -100,16 +131,33 @@ export function DashboardSidebarHeader({
 	const matchRoute = useMatchRoute();
 	const { gateFeature } = usePaywall();
 	const isWorkspacesListOpen = !!matchRoute({ to: "/v2-workspaces" });
-	const onV2WorkspaceRoute = !!matchRoute({
+	const v2WorkspaceMatch = matchRoute({
 		to: "/v2-workspace/$workspaceId",
 		fuzzy: true,
 	});
+	const onV2WorkspaceRoute = v2WorkspaceMatch !== false;
+	// Pre-select the viewed workspace's project in the new-workspace modal.
+	const { workspaces: hostWorkspaces } = useHostWorkspaces();
+	const activeProjectId =
+		v2WorkspaceMatch !== false
+			? (hostWorkspaces.find(
+					(workspace) => workspace.id === v2WorkspaceMatch.workspaceId,
+				)?.projectId ?? undefined)
+			: undefined;
 	const isTasksOpen = !!matchRoute({ to: "/tasks", fuzzy: true });
 	const isPullRequestsOpen = !!matchRoute({
 		to: "/pull-requests",
 		fuzzy: true,
 	});
 	const isAutomationsOpen = !!matchRoute({ to: "/automations", fuzzy: true });
+	const isPluginsOpen = !!matchRoute({ to: "/plugins", fuzzy: true });
+	const isPagesOpen = !!matchRoute({ to: "/pages", fuzzy: true });
+	// `?? false`: the hook returns undefined until PostHog flags resolve.
+	// Dev builds bypass the flag — the local dev account isn't in the
+	// @superset.sh release condition.
+	const isPluginsEnabled =
+		(useFeatureFlagEnabled(FEATURE_FLAGS.PLUGINS) ?? false) ||
+		env.NODE_ENV === "development";
 	const { myFailedCount } = useFailedAutomations();
 
 	const {
@@ -117,14 +165,17 @@ export function DashboardSidebarHeader({
 		assignee: lastAssignee,
 		search: lastSearch,
 		typeTab: lastTypeTab,
-		projectFilter: lastProjectFilter,
+		projectFilters: lastProjectFilters,
 		linearProjectFilter: lastLinearProjectFilter,
 		includeClosedIssues: lastIncludeClosedIssues,
 	} = useTasksFilterStore();
 	const {
 		search: lastPullRequestsSearch,
-		projectFilter: lastPullRequestsProjectFilter,
+		projectFilters: lastPullRequestsProjectFilters,
+		authorFilter: lastPullRequestsAuthorFilter,
+		reviewFilter: lastPullRequestsReviewFilter,
 		includeClosed: lastPullRequestsIncludeClosed,
+		mergedOnly: lastPullRequestsMergedOnly,
 	} = usePullRequestsFilterStore();
 
 	const handleWorkspacesClick = () => {
@@ -144,7 +195,7 @@ export function DashboardSidebarHeader({
 					assignee: lastAssignee,
 					search: lastSearch,
 					typeTab: lastTypeTab,
-					projectFilter: lastProjectFilter,
+					projectFilters: lastProjectFilters,
 					linearProjectFilter: lastLinearProjectFilter,
 					includeClosedIssues: lastIncludeClosedIssues,
 				}),
@@ -152,16 +203,27 @@ export function DashboardSidebarHeader({
 		});
 	};
 
+	const isPagesEnabled = useFeatureFlagEnabled(FEATURE_FLAGS.PAGES) ?? false;
+
+	const handlePagesClick = () => {
+		navigate({ to: "/pages" });
+	};
+
+	const handlePluginsClick = () => {
+		navigate({ to: "/plugins" });
+	};
+
 	const handlePullRequestsClick = () => {
-		gateFeature(GATED_FEATURES.TASKS, () => {
-			navigate({
-				to: "/pull-requests",
-				search: pullRequestsSearchFromFilters({
-					search: lastPullRequestsSearch,
-					projectFilter: lastPullRequestsProjectFilter,
-					includeClosed: lastPullRequestsIncludeClosed,
-				}),
-			});
+		navigate({
+			to: "/pull-requests",
+			search: pullRequestsSearchFromFilters({
+				search: lastPullRequestsSearch,
+				projectFilters: lastPullRequestsProjectFilters,
+				authorFilter: lastPullRequestsAuthorFilter,
+				reviewFilter: lastPullRequestsReviewFilter,
+				includeClosed: lastPullRequestsIncludeClosed,
+				mergedOnly: lastPullRequestsMergedOnly,
+			}),
 		});
 	};
 
@@ -188,7 +250,7 @@ export function DashboardSidebarHeader({
 						<TooltipTrigger asChild>
 							<button
 								type="button"
-								onClick={() => openModal()}
+								onClick={() => openModal(activeProjectId)}
 								className="flex size-7 items-center justify-center rounded-md bg-fill-hover/60 [.light_&]:bg-fill-hover text-muted-foreground transition-colors hover:bg-fill-selected [.light_&]:hover:bg-fill-selected"
 							>
 								<div className="flex size-5 items-center justify-center rounded bg-fill-selected">
@@ -197,7 +259,7 @@ export function DashboardSidebarHeader({
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">
-							New Workspace ({shortcutText})
+							<Trans>New Workspace ({shortcutText})</Trans>
 						</TooltipContent>
 					</Tooltip>
 
@@ -214,8 +276,12 @@ export function DashboardSidebarHeader({
 						</TooltipTrigger>
 						<TooltipContent side="right">
 							{searchShortcutText !== "Unassigned"
-								? `Search (${searchShortcutText})`
-								: "Search"}
+								? t({
+										message: `Search (${searchShortcutText})`,
+									})
+								: t({
+										message: "Search",
+									})}
 						</TooltipContent>
 					</Tooltip>
 
@@ -234,7 +300,9 @@ export function DashboardSidebarHeader({
 								<LuLayers className="size-3.5" strokeWidth={1.5} />
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="right">Workspaces</TooltipContent>
+						<TooltipContent side="right">
+							<Trans>Workspaces</Trans>
+						</TooltipContent>
 					</Tooltip>
 
 					<Tooltip delayDuration={300}>
@@ -244,8 +312,12 @@ export function DashboardSidebarHeader({
 								onClick={handleAutomationsClick}
 								aria-label={
 									myFailedCount > 0
-										? `Automations, ${myFailedCount} failing`
-										: "Automations"
+										? t({
+												message: `Automations, ${myFailedCount} failing`,
+											})
+										: t({
+												message: "Automations",
+											})
 								}
 								className={cn(
 									"relative flex size-7 items-center justify-center rounded-md transition-colors",
@@ -264,9 +336,11 @@ export function DashboardSidebarHeader({
 							</button>
 						</TooltipTrigger>
 						<TooltipContent side="right">
-							{myFailedCount > 0
-								? `Automations (${myFailedCount} failing)`
-								: "Automations"}
+							{myFailedCount > 0 ? (
+								<Trans>Automations ({myFailedCount} failing)</Trans>
+							) : (
+								<Trans>Automations</Trans>
+							)}
 						</TooltipContent>
 					</Tooltip>
 
@@ -275,7 +349,9 @@ export function DashboardSidebarHeader({
 							<button
 								type="button"
 								onClick={handleTasksClick}
-								aria-label="Tasks"
+								aria-label={t({
+									message: "Tasks",
+								})}
 								aria-current={isTasksOpen ? "page" : undefined}
 								className={cn(
 									"flex size-7 items-center justify-center rounded-md transition-colors",
@@ -287,7 +363,9 @@ export function DashboardSidebarHeader({
 								<HiOutlineClipboardDocumentList className="size-3.5" />
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="right">Tasks</TooltipContent>
+						<TooltipContent side="right">
+							<Trans>Tasks</Trans>
+						</TooltipContent>
 					</Tooltip>
 
 					<Tooltip delayDuration={300}>
@@ -295,7 +373,9 @@ export function DashboardSidebarHeader({
 							<button
 								type="button"
 								onClick={handlePullRequestsClick}
-								aria-label="Pull requests"
+								aria-label={t({
+									message: "Pull requests",
+								})}
 								aria-current={isPullRequestsOpen ? "page" : undefined}
 								className={cn(
 									"flex size-7 items-center justify-center rounded-md transition-colors",
@@ -307,8 +387,62 @@ export function DashboardSidebarHeader({
 								<GoGitPullRequest className="size-3.5" />
 							</button>
 						</TooltipTrigger>
-						<TooltipContent side="right">Pull requests</TooltipContent>
+						<TooltipContent side="right">
+							<Trans>Pull requests</Trans>
+						</TooltipContent>
 					</Tooltip>
+
+					{isPagesEnabled && (
+						<Tooltip delayDuration={300}>
+							<TooltipTrigger asChild>
+								<button
+									type="button"
+									onClick={handlePagesClick}
+									aria-label={t({
+										message: "Pages",
+									})}
+									aria-current={isPagesOpen ? "page" : undefined}
+									className={cn(
+										"flex size-7 items-center justify-center rounded-md transition-colors",
+										isPagesOpen
+											? "bg-fill-selected text-muted-foreground"
+											: "text-muted-foreground hover:bg-fill-hover",
+									)}
+								>
+									<LuFileText className="size-3.5" strokeWidth={1.5} />
+								</button>
+							</TooltipTrigger>
+							<TooltipContent side="right">
+								<Trans>Pages</Trans>
+							</TooltipContent>
+						</Tooltip>
+					)}
+
+					{isPluginsEnabled && (
+						<Tooltip delayDuration={300}>
+							<TooltipTrigger asChild>
+								<button
+									type="button"
+									onClick={handlePluginsClick}
+									aria-label={t({
+										message: "Plugins",
+									})}
+									aria-current={isPluginsOpen ? "page" : undefined}
+									className={cn(
+										"flex size-7 items-center justify-center rounded-md transition-colors",
+										isPluginsOpen
+											? "bg-fill-selected text-muted-foreground"
+											: "text-muted-foreground hover:bg-fill-hover",
+									)}
+								>
+									<LuPuzzle className="size-3.5" strokeWidth={1.5} />
+								</button>
+							</TooltipTrigger>
+							<TooltipContent side="right">
+								<Trans>Plugins</Trans>
+							</TooltipContent>
+						</Tooltip>
+					)}
 
 					<DropdownMenu>
 						<Tooltip delayDuration={700}>
@@ -316,7 +450,9 @@ export function DashboardSidebarHeader({
 								<DropdownMenuTrigger asChild>
 									<button
 										type="button"
-										aria-label="Add project"
+										aria-label={t({
+											message: "Add project",
+										})}
 										className="group/addrepo flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-fill-hover"
 									>
 										<VscNewFolder className="size-3.5 group-hover/addrepo:hidden" />
@@ -324,7 +460,9 @@ export function DashboardSidebarHeader({
 									</button>
 								</DropdownMenuTrigger>
 							</TooltipTrigger>
-							<TooltipContent side="right">Add project</TooltipContent>
+							<TooltipContent side="right">
+								<Trans>Add project</Trans>
+							</TooltipContent>
 						</Tooltip>
 						<DropdownMenuContent
 							align="start"
@@ -332,19 +470,19 @@ export function DashboardSidebarHeader({
 						>
 							<DropdownMenuItem onSelect={handleImportFolder}>
 								<VscFolderOpened className="size-4" />
-								Open project
+								<Trans>Open project</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={() => openNewProject()}>
 								<VscGithubAlt className="size-4" />
-								Clone from URL
+								<Trans>Clone from URL</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={() => openEmptyProject()}>
 								<VscNewFolder className="size-4" />
-								Create new project
+								<Trans>Create new project</Trans>
 							</DropdownMenuItem>
 							<DropdownMenuItem onSelect={() => openTemplateGallery()}>
 								<VscLayout className="size-4" />
-								Start from a template
+								<Trans>Start from a template</Trans>
 							</DropdownMenuItem>
 						</DropdownMenuContent>
 					</DropdownMenu>
@@ -379,23 +517,26 @@ export function DashboardSidebarHeader({
 					className="drag h-full shrink-0"
 					style={{ width: isMac ? `${80 / zoomFactor}px` : "8px" }}
 				/>
-				<ZoomStable enabled={isMac} className="flex items-center gap-1.5">
+				<ZoomStable enabled={isMac} className="flex items-center gap-1">
 					<SidebarToggle />
 					<NavigationControls />
+					{/* Lives here (persistent chrome) rather than the workspace tab
+					    bar, which remounts on every navigation. */}
+					<TopBarPortsDropdown align="start" />
 				</ZoomStable>
 				<div className="drag h-full min-w-0 flex-1" />
 			</div>
 
 			<button
 				type="button"
-				onClick={() => openModal()}
-				className="group flex w-full items-center gap-2 rounded-md bg-fill-hover/60 [.light_&]:bg-fill-hover px-1 py-1 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-fill-selected [.light_&]:hover:bg-fill-selected hover:text-foreground"
+				onClick={() => openModal(activeProjectId)}
+				className="group flex h-7 w-full items-center gap-2 rounded-md bg-fill-hover/60 [.light_&]:bg-fill-hover px-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-fill-selected [.light_&]:hover:bg-fill-selected hover:text-foreground"
 			>
 				<div className="flex size-5 shrink-0 items-center justify-center rounded bg-fill-selected">
 					<LuPlus className="size-3" strokeWidth={STROKE_WIDTH_THICK} />
 				</div>
 				<span className="flex-1 truncate text-left whitespace-nowrap">
-					New Workspace
+					<Trans>New Workspace</Trans>
 				</span>
 				<SidebarKbdHint label={shortcutText} />
 			</button>
@@ -404,13 +545,15 @@ export function DashboardSidebarHeader({
 				type="button"
 				onPointerDown={handleSearchPointerDown}
 				onClick={handleSearchClick}
-				className="group flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-fill-hover hover:text-foreground"
+				className="group flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium text-muted-foreground transition-colors hover:bg-fill-hover hover:text-foreground"
 			>
 				<LuSearch
-					className="size-3.5 shrink-0 text-muted-foreground"
+					className="size-4 shrink-0 text-muted-foreground"
 					strokeWidth={1.5}
 				/>
-				<span className="flex-1 text-left">Search</span>
+				<span className="flex-1 text-left">
+					<Trans>Search</Trans>
+				</span>
 				{searchShortcutText !== "Unassigned" && (
 					<SidebarKbdHint label={searchShortcutText} />
 				)}
@@ -420,37 +563,43 @@ export function DashboardSidebarHeader({
 				type="button"
 				onClick={handleWorkspacesClick}
 				className={cn(
-					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
+					"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
 					isWorkspacesListOpen
 						? "bg-fill-selected text-foreground"
 						: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
 				)}
 			>
 				<LuLayers
-					className="size-3.5 shrink-0 text-muted-foreground"
+					className="size-4 shrink-0 text-muted-foreground"
 					strokeWidth={1.5}
 				/>
-				<span className="flex-1 text-left">Workspaces</span>
+				<span className="flex-1 text-left">
+					<Trans>Workspaces</Trans>
+				</span>
 			</button>
 
 			<button
 				type="button"
 				onClick={handleAutomationsClick}
 				className={cn(
-					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
+					"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
 					isAutomationsOpen
 						? "bg-fill-selected text-foreground"
 						: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
 				)}
 			>
 				<LuClock
-					className="size-3.5 shrink-0 text-muted-foreground"
+					className="size-4 shrink-0 text-muted-foreground"
 					strokeWidth={1.5}
 				/>
-				<span className="flex-1 text-left">Automations</span>
+				<span className="flex-1 text-left">
+					<Trans>Automations</Trans>
+				</span>
 				{myFailedCount > 0 && (
 					<span
-						title={`${myFailedCount} of your automations failed their last run`}
+						title={t({
+							message: `${myFailedCount} of your automations failed their last run`,
+						})}
 						className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-red-500/15 px-1 text-[10px] font-medium tabular-nums text-red-600 dark:text-red-400"
 					>
 						{myFailedCount > 9 ? "9+" : myFailedCount}
@@ -461,34 +610,92 @@ export function DashboardSidebarHeader({
 			<button
 				type="button"
 				onClick={handleTasksClick}
-				aria-label="Tasks"
+				aria-label={t({
+					message: "Tasks",
+				})}
 				aria-current={isTasksOpen ? "page" : undefined}
 				className={cn(
-					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
+					"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
 					isTasksOpen
 						? "bg-fill-selected text-foreground"
 						: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
 				)}
 			>
-				<HiOutlineClipboardDocumentList className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="flex-1 text-left">Tasks</span>
+				<HiOutlineClipboardDocumentList className="size-4 shrink-0 text-muted-foreground" />
+				<span className="flex-1 text-left">
+					<Trans>Tasks</Trans>
+				</span>
 			</button>
 
 			<button
 				type="button"
 				onClick={handlePullRequestsClick}
-				aria-label="Pull requests"
+				aria-label={t({
+					message: "Pull requests",
+				})}
 				aria-current={isPullRequestsOpen ? "page" : undefined}
 				className={cn(
-					"flex w-full items-center gap-2 rounded-md px-2 py-1 text-[13px] font-medium transition-colors",
+					"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
 					isPullRequestsOpen
 						? "bg-fill-selected text-foreground"
 						: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
 				)}
 			>
-				<GoGitPullRequest className="size-3.5 shrink-0 text-muted-foreground" />
-				<span className="flex-1 text-left">Pull requests</span>
+				<GoGitPullRequest className="size-4 shrink-0 text-muted-foreground" />
+				<span className="flex-1 text-left">
+					<Trans>Pull requests</Trans>
+				</span>
 			</button>
+
+			{isPagesEnabled && (
+				<button
+					type="button"
+					onClick={handlePagesClick}
+					aria-label={t({
+						message: "Pages",
+					})}
+					aria-current={isPagesOpen ? "page" : undefined}
+					className={cn(
+						"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
+						isPagesOpen
+							? "bg-fill-selected text-foreground"
+							: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
+					)}
+				>
+					<LuFileText
+						className="size-4 shrink-0 text-muted-foreground"
+						strokeWidth={1.5}
+					/>
+					<span className="flex-1 text-left">
+						<Trans>Pages</Trans>
+					</span>
+				</button>
+			)}
+
+			{isPluginsEnabled && (
+				<button
+					type="button"
+					onClick={handlePluginsClick}
+					aria-label={t({
+						message: "Plugins",
+					})}
+					aria-current={isPluginsOpen ? "page" : undefined}
+					className={cn(
+						"flex h-7 w-full items-center gap-2 rounded-md px-2 text-[13px] font-medium transition-colors",
+						isPluginsOpen
+							? "bg-fill-selected text-foreground"
+							: "text-muted-foreground hover:bg-fill-hover hover:text-foreground",
+					)}
+				>
+					<LuPuzzle
+						className="size-4 shrink-0 text-muted-foreground"
+						strokeWidth={1.5}
+					/>
+					<span className="flex-1 text-left">
+						<Trans>Plugins</Trans>
+					</span>
+				</button>
+			)}
 		</div>
 	);
 }

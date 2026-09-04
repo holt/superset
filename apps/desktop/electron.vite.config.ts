@@ -15,6 +15,7 @@ import {
 	defineEnv,
 	devPath,
 	htmlEnvTransformPlugin,
+	linguiMacroPlugin,
 } from "./vite/helpers";
 
 // override: true ensures .env values take precedence over inherited env vars
@@ -61,7 +62,7 @@ const hostServiceSentryPlugin = process.env.SENTRY_AUTH_TOKEN
 
 export default defineConfig({
 	main: {
-		plugins: [tsconfigPaths, copyResourcesPlugin()],
+		plugins: [tsconfigPaths, linguiMacroPlugin(), copyResourcesPlugin()],
 
 		define: {
 			"process.env.NODE_ENV": defineEnv(process.env.NODE_ENV, "production"),
@@ -115,7 +116,6 @@ export default defineConfig({
 			"process.env.DESKTOP_NOTIFICATIONS_PORT": defineEnv(
 				process.env.DESKTOP_NOTIFICATIONS_PORT,
 			),
-			"process.env.ELECTRIC_PORT": defineEnv(process.env.ELECTRIC_PORT),
 			"process.env.SUPERSET_WORKSPACE_NAME": defineEnv(
 				process.env.SUPERSET_WORKSPACE_NAME,
 			),
@@ -208,10 +208,6 @@ export default defineConfig({
 				process.env.NEXT_PUBLIC_MARKETING_URL,
 				"https://superset.sh",
 			),
-			"process.env.NEXT_PUBLIC_ELECTRIC_URL": defineEnv(
-				process.env.NEXT_PUBLIC_ELECTRIC_URL,
-				"https://electric-proxy.avi-6ac.workers.dev",
-			),
 			"process.env.NEXT_PUBLIC_DOCS_URL": defineEnv(
 				process.env.NEXT_PUBLIC_DOCS_URL,
 				"https://docs.superset.sh",
@@ -239,7 +235,6 @@ export default defineConfig({
 			"process.env.DESKTOP_NOTIFICATIONS_PORT": defineEnv(
 				process.env.DESKTOP_NOTIFICATIONS_PORT,
 			),
-			"process.env.ELECTRIC_PORT": defineEnv(process.env.ELECTRIC_PORT),
 			"process.env.SUPERSET_WORKSPACE_NAME": defineEnv(
 				process.env.SUPERSET_WORKSPACE_NAME,
 			),
@@ -269,7 +264,10 @@ export default defineConfig({
 				hideConsole: true,
 				port: Number(process.env.CODE_INSPECTOR_PORT) || undefined,
 			}),
-			reactPlugin(),
+			reactPlugin({
+				// Compiles @lingui/react/macro (Trans, useLingui) at build time.
+				babel: { plugins: ["@lingui/babel-plugin-lingui-macro"] },
+			}),
 			htmlEnvTransformPlugin(),
 		],
 

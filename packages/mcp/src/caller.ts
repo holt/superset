@@ -51,5 +51,10 @@ export function createMcpCaller(ctx: McpContext): McpCaller {
 		session,
 		auth,
 		headers,
+		client: null,
+		// The one place the server learns, from the transport rather than from a
+		// request body, that an agent is calling. Procedures that attribute or
+		// gate on "is this an agent" read this.
+		agentCaller: { transport: "mcp", label: ctx.clientLabel },
 	});
 }

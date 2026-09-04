@@ -1,3 +1,4 @@
+import { Trans } from "@lingui/react/macro";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -8,25 +9,27 @@ import {
 } from "@superset/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
-import { eq } from "@tanstack/db";
-import { useLiveQuery } from "@tanstack/react-db";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useMemo } from "react";
 import { LuCpu, LuGitBranch, LuHistory } from "react-icons/lu";
 import { usePresetIcon } from "renderer/assets/app-icons/preset-icons";
 import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
 import { useIsV2CloudEnabled } from "renderer/hooks/useIsV2CloudEnabled";
+import { cloudTrpc } from "renderer/lib/cloud-trpc";
 import { electronTrpc } from "renderer/lib/electron-trpc";
 import {
 	StatusIcon,
 	type StatusType,
 } from "renderer/routes/_authenticated/_dashboard/tasks/components/TasksView/components/shared/StatusIcon";
-import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 import {
 	type RecentlyViewedEntry,
 	useRecentlyViewed,
 } from "./hooks/useRecentlyViewed";
+import {
+	joinTasksWithStatuses,
+	TASK_LOOKUP_LIMIT,
+} from "./utils/joinTasksWithStatuses";
 
 function WorkspaceRow({
 	entry,
@@ -54,7 +57,7 @@ function WorkspaceRow({
 			{ws ? (
 				<>
 					<span className="text-muted-foreground text-xs shrink-0 w-20 text-left line-clamp-1">
-						Workspace
+						<Trans>Workspace</Trans>
 					</span>
 					<span className="flex items-center justify-center w-4 shrink-0">
 						<span
@@ -69,10 +72,10 @@ function WorkspaceRow({
 			) : (
 				<>
 					<span className="text-muted-foreground text-xs shrink-0 w-20 text-left line-clamp-1">
-						Workspace
+						<Trans>Workspace</Trans>
 					</span>
 					<span className="truncate text-xs font-normal text-muted-foreground flex-1 min-w-0">
-						Unknown
+						<Trans>Unknown</Trans>
 					</span>
 				</>
 			)}
@@ -103,7 +106,7 @@ function V2WorkspaceRow({
 			onSelect={onSelect}
 		>
 			<span className="text-muted-foreground text-xs shrink-0 w-20 text-left line-clamp-1">
-				{ws ? ws.projectName : "Workspace"}
+				{ws ? ws.projectName : <Trans>Workspace</Trans>}
 			</span>
 			<span className="flex items-center justify-center w-4 shrink-0">
 				<LuGitBranch
@@ -117,7 +120,7 @@ function V2WorkspaceRow({
 					!ws && "text-muted-foreground",
 				)}
 			>
-				{ws ? ws.branch : "Unknown"}
+				{ws ? ws.branch : <Trans>Unknown</Trans>}
 			</span>
 		</DropdownMenuItem>
 	);
@@ -147,7 +150,7 @@ function AutomationRow({
 			onSelect={onSelect}
 		>
 			<span className="text-muted-foreground text-xs shrink-0 w-20 text-left line-clamp-1">
-				Automation
+				<Trans>Automation</Trans>
 			</span>
 			<span className="flex items-center justify-center w-4 shrink-0">
 				{presetIcon ? (
@@ -162,7 +165,7 @@ function AutomationRow({
 					!automation && "text-muted-foreground",
 				)}
 			>
-				{automation ? automation.name : "Unknown"}
+				{automation ? automation.name : <Trans>Unknown</Trans>}
 			</span>
 		</DropdownMenuItem>
 	);
@@ -215,10 +218,10 @@ function TaskRow({
 			) : (
 				<>
 					<span className="text-muted-foreground text-xs shrink-0 w-20 text-left line-clamp-1">
-						Task
+						<Trans>Task</Trans>
 					</span>
 					<span className="truncate text-xs font-normal text-muted-foreground flex-1 min-w-0">
-						Unknown
+						<Trans>Unknown</Trans>
 					</span>
 				</>
 			)}
@@ -230,7 +233,6 @@ export function HistoryDropdown() {
 	const navigate = useNavigate();
 	const recentEntries = useRecentlyViewed(20);
 	const currentPath = useLocation({ select: (loc) => loc.pathname });
-	const collections = useCollections();
 	const isV2CloudEnabled = useIsV2CloudEnabled();
 
 	const { data: groups } = electronTrpc.workspaces.getAllGrouped.useQuery();
@@ -258,42 +260,36 @@ export function HistoryDropdown() {
 		const projectNamesById = new Map(
 			(v2ProjectData ?? []).map((p) => [p.id, p.name]),
 		);
-		// Inner join: drop workspaces whose project isn't synced yet.
+		// Inner join: drop workspaces whose project isn't synced yet (and
+		// project-less session workspaces).
 		return hostWorkspaces.flatMap((workspace) => {
+			if (workspace.projectId === null) return [];
 			const projectName = projectNamesById.get(workspace.projectId);
 			if (projectName === undefined) return [];
 			return [{ id: workspace.id, projectName, branch: workspace.branch }];
 		});
 	}, [hostWorkspaces, v2ProjectData]);
 
-	const { data: automationData } = useLiveQuery(
-		(q) =>
-			q
-				.from({ automations: collections.automations })
-				.select(({ automations }) => ({
-					id: automations.id,
-					name: automations.name,
-					agentId: automations.agent,
-				})),
-		[collections],
+	const { data: automations = [] } =
+		cloudTrpc.automation.list.useQuery(undefined);
+	const automationData = useMemo(
+		() =>
+			automations.map((automation) => ({
+				id: automation.id,
+				name: automation.name,
+				agentId: automation.agent,
+			})),
+		[automations],
 	);
 
-	const { data: taskData } = useLiveQuery(
-		(q) =>
-			q
-				.from({ tasks: collections.tasks })
-				.innerJoin({ status: collections.taskStatuses }, ({ tasks, status }) =>
-					eq(tasks.statusId, status.id),
-				)
-				.select(({ tasks, status }) => ({
-					id: tasks.id,
-					slug: tasks.slug,
-					title: tasks.title,
-					statusColor: status.color,
-					statusType: status.type,
-					statusProgress: status.progressPercent,
-				})),
-		[collections],
+	const { data: taskPage } = cloudTrpc.task.listPage.useQuery({
+		limit: TASK_LOOKUP_LIMIT,
+	});
+	const { data: taskStatuses = [] } =
+		cloudTrpc.task.statuses.list.useQuery(undefined);
+	const taskData = useMemo(
+		() => joinTasksWithStatuses(taskPage?.items ?? [], taskStatuses),
+		[taskPage, taskStatuses],
 	);
 
 	const filteredEntries = recentEntries.filter((entry) => {
@@ -307,9 +303,9 @@ export function HistoryDropdown() {
 		}
 		if (entry.type === "automation") {
 			if (!isV2CloudEnabled) return false;
-			return (automationData ?? []).some((a) => a.id === entry.entityId);
+			return automationData.some((a) => a.id === entry.entityId);
 		}
-		return (taskData ?? []).some(
+		return taskData.some(
 			(t) => t.id === entry.entityId || t.slug === entry.entityId,
 		);
 	});
@@ -326,7 +322,9 @@ export function HistoryDropdown() {
 						<LuHistory className="size-3.5" strokeWidth={1.5} />
 					</button>
 				</TooltipTrigger>
-				<TooltipContent side="bottom">Recently viewed</TooltipContent>
+				<TooltipContent side="bottom">
+					<Trans>Recently viewed</Trans>
+				</TooltipContent>
 			</Tooltip>
 		);
 	}
@@ -344,10 +342,14 @@ export function HistoryDropdown() {
 						</button>
 					</DropdownMenuTrigger>
 				</TooltipTrigger>
-				<TooltipContent side="bottom">Recently viewed</TooltipContent>
+				<TooltipContent side="bottom">
+					<Trans>Recently viewed</Trans>
+				</TooltipContent>
 			</Tooltip>
 			<DropdownMenuContent align="start" className="w-80">
-				<DropdownMenuLabel>Recently Viewed</DropdownMenuLabel>
+				<DropdownMenuLabel>
+					<Trans>Recently Viewed</Trans>
+				</DropdownMenuLabel>
 				<DropdownMenuSeparator />
 				{filteredEntries.map((entry) => {
 					if (entry.type === "task") {
@@ -356,7 +358,7 @@ export function HistoryDropdown() {
 								key={entry.path}
 								entry={entry}
 								isCurrent={entry.path === currentPath}
-								taskData={taskData ?? []}
+								taskData={taskData}
 								onSelect={() => navigate({ to: entry.path })}
 							/>
 						);
@@ -378,7 +380,7 @@ export function HistoryDropdown() {
 								key={entry.path}
 								entry={entry}
 								isCurrent={entry.path === currentPath}
-								automationData={automationData ?? []}
+								automationData={automationData}
 								onSelect={() => navigate({ to: entry.path })}
 							/>
 						);

@@ -1,3 +1,5 @@
+import { Trans, useLingui } from "@lingui/react/macro";
+import { errorMessage } from "@superset/i18n/errors";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -71,6 +73,7 @@ export function TerminalConnectionIndicator({
 	terminalId,
 	terminalInstanceId,
 }: TerminalConnectionIndicatorProps) {
+	const { t } = useLingui();
 	const subscribe = useCallback(
 		(callback: () => void) => {
 			const unsubState = terminalRuntimeRegistry.onStateChange(
@@ -102,6 +105,12 @@ export function TerminalConnectionIndicator({
 			terminalInstanceId,
 		),
 	);
+	const terminated = useSyncExternalStore(subscribe, () =>
+		terminalRuntimeRegistry.isConnectionTerminated(
+			terminalId,
+			terminalInstanceId,
+		),
+	);
 	const [confirmRestartOpen, setConfirmRestartOpen] = useState(false);
 	const [showLog, setShowLog] = useState(false);
 
@@ -117,13 +126,27 @@ export function TerminalConnectionIndicator({
 	);
 	const restartDaemon = workspaceTrpc.terminal.daemon.restart.useMutation({
 		onSuccess: () => {
-			toast.success("Terminals restarted", {
-				description: "All terminal sessions were closed.",
-			});
+			toast.success(
+				t({
+					message: "Terminals restarted",
+				}),
+				{
+					description: t({
+						message: "All terminal sessions were closed.",
+					}),
+				},
+			);
 			void healthQuery.refetch();
 		},
 		onError: (error) => {
-			toast.error("Couldn't restart terminals", { description: error.message });
+			toast.error(
+				t({
+					message: "Couldn't restart terminals",
+				}),
+				{
+					description: errorMessage(error),
+				},
+			);
 		},
 	});
 
@@ -152,8 +175,11 @@ export function TerminalConnectionIndicator({
 
 	// Three failure modes so copy + colour name the fix that applies. Amber =
 	// still working itself out (auto-retry, or a stall that usually self-heals);
-	// red = we've stopped trying and need the user.
-	const gaveUp = diagnosis !== null && connectionState === "closed";
+	// red = we've stopped trying and need the user. A surfaced diagnosis alone
+	// isn't red: the transport keeps auto-retrying through long outages (wedged
+	// daemon, offline host) and self-heals — red is reserved for terminated.
+	const gaveUp =
+		diagnosis !== null && connectionState === "closed" && terminated;
 	const mode = daemonUnreachable
 		? "unresponsive"
 		: gaveUp
@@ -162,10 +188,16 @@ export function TerminalConnectionIndicator({
 	const reconnecting = connectionState === "connecting";
 	const label =
 		mode === "unresponsive"
-			? "Terminals aren't responding"
+			? t({
+					message: "Terminals aren't responding",
+				})
 			: mode === "disconnected"
-				? "Disconnected"
-				: "Reconnecting…";
+				? t({
+						message: "Disconnected",
+					})
+				: t({
+						message: "Reconnecting…",
+					});
 	const StatusIcon = mode === "reconnecting" ? Loader2 : TriangleAlert;
 	const accentClass =
 		mode === "disconnected" ? "text-destructive" : "text-yellow-500";
@@ -181,7 +213,9 @@ export function TerminalConnectionIndicator({
 			<PopoverTrigger asChild>
 				<button
 					type="button"
-					aria-label={`Terminal connection: ${label}`}
+					aria-label={t({
+						message: `Terminal connection: ${label}`,
+					})}
 					className="flex h-5 items-center gap-1.5 rounded px-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
 				>
 					<span className={cn("size-1.5 rounded-full", dotClass)} />
@@ -224,12 +258,12 @@ export function TerminalConnectionIndicator({
 								{reconnecting ? (
 									<>
 										<Loader2 className="animate-spin" />
-										Reconnecting…
+										<Trans>Reconnecting…</Trans>
 									</>
 								) : (
 									<>
 										<RotateCw />
-										Reconnect
+										<Trans>Reconnect</Trans>
 									</>
 								)}
 							</Button>
@@ -241,7 +275,7 @@ export function TerminalConnectionIndicator({
 								disabled={restartDaemon.isPending}
 								onClick={() => setConfirmRestartOpen(true)}
 							>
-								Restart
+								<Trans>Restart</Trans>
 							</Button>
 						)}
 					</div>
@@ -251,7 +285,7 @@ export function TerminalConnectionIndicator({
 							onClick={() => setShowLog((v) => !v)}
 							className="self-center text-xs text-muted-foreground/70 transition-colors hover:text-foreground"
 						>
-							{showLog ? "Hide log" : "View log"}
+							{showLog ? <Trans>Hide log</Trans> : <Trans>View log</Trans>}
 						</button>
 					)}
 				</div>
@@ -295,7 +329,7 @@ export function TerminalConnectionIndicator({
 							}
 							className="self-start text-muted-foreground transition-colors hover:text-foreground"
 						>
-							Copy log
+							<Trans>Copy log</Trans>
 						</button>
 					</div>
 				)}
@@ -306,22 +340,28 @@ export function TerminalConnectionIndicator({
 			>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>Restart all terminals?</AlertDialogTitle>
+						<AlertDialogTitle>
+							<Trans>Restart all terminals?</Trans>
+						</AlertDialogTitle>
 						<AlertDialogDescription>
-							This closes every terminal session — in this workspace and any
-							others — and can't be undone. If they're only briefly stuck,
-							waiting usually brings them back.
+							<Trans>
+								This closes every terminal session — in this workspace and any
+								others — and can't be undone. If they're only briefly stuck,
+								waiting usually brings them back.
+							</Trans>
 						</AlertDialogDescription>
 					</AlertDialogHeader>
 					<AlertDialogFooter>
-						<AlertDialogCancel>Keep waiting</AlertDialogCancel>
+						<AlertDialogCancel>
+							<Trans>Keep waiting</Trans>
+						</AlertDialogCancel>
 						<AlertDialogAction
 							onClick={() => {
 								setConfirmRestartOpen(false);
 								restartDaemon.mutate();
 							}}
 						>
-							Restart terminals
+							<Trans>Restart terminals</Trans>
 						</AlertDialogAction>
 					</AlertDialogFooter>
 				</AlertDialogContent>

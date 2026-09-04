@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
 	Breadcrumb,
 	BreadcrumbItem,
@@ -7,41 +8,46 @@ import {
 	BreadcrumbSeparator,
 } from "@superset/ui/breadcrumb";
 import { Button } from "@superset/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@superset/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
-import { LuClock, LuPause, LuPlay, LuTrash2 } from "react-icons/lu";
+import { Link } from "@tanstack/react-router";
+import { LuClock, LuEllipsis, LuPlay, LuTrash2 } from "react-icons/lu";
 
 interface AutomationDetailHeaderProps {
 	name: string;
-	enabled: boolean;
-	onBack: () => void;
-	onToggleEnabled: () => void;
 	onDelete: () => void;
 	onRunNow: () => void;
 	onOpenHistory: () => void;
-	toggleDisabled?: boolean;
 	deleteDisabled?: boolean;
 	runNowDisabled?: boolean;
+	/** Disables the actions — they're all owner-gated server-side. */
+	readOnly?: boolean;
 }
 
 export function AutomationDetailHeader({
 	name,
-	enabled,
-	onBack,
-	onToggleEnabled,
 	onDelete,
 	onRunNow,
 	onOpenHistory,
-	toggleDisabled,
 	deleteDisabled,
 	runNowDisabled,
+	readOnly,
 }: AutomationDetailHeaderProps) {
+	const { t } = useLingui();
 	return (
 		<header className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4">
 			<Breadcrumb>
 				<BreadcrumbList className="text-sm">
 					<BreadcrumbItem>
-						<BreadcrumbLink onClick={onBack} className="cursor-pointer">
-							Automations
+						<BreadcrumbLink asChild>
+							<Link to="/automations">
+								<Trans>Automations</Trans>
+							</Link>
 						</BreadcrumbLink>
 					</BreadcrumbItem>
 					<BreadcrumbSeparator />
@@ -56,61 +62,79 @@ export function AutomationDetailHeader({
 
 			<div className="flex items-center gap-1">
 				<Tooltip>
+					{/* Disabled buttons swallow hover events, so the trigger is a
+					    span — otherwise the read-only explanation never shows. */}
 					<TooltipTrigger asChild>
-						<Button
-							variant="ghost"
-							size="icon-sm"
-							onClick={onOpenHistory}
-							aria-label="Version history"
-						>
-							<LuClock className="size-4" />
-						</Button>
+						<span className="inline-flex">
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								onClick={onOpenHistory}
+								disabled={readOnly}
+								aria-label={t({
+									message: "Prompt history",
+								})}
+							>
+								<LuClock className="size-4" />
+							</Button>
+						</span>
 					</TooltipTrigger>
-					<TooltipContent>Version history</TooltipContent>
+					<TooltipContent>
+						{readOnly ? (
+							<Trans>Only the owner can view prompt history</Trans>
+						) : (
+							<Trans>Prompt history</Trans>
+						)}
+					</TooltipContent>
 				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
+				<DropdownMenu>
+					<DropdownMenuTrigger asChild>
 						<Button
 							variant="ghost"
 							size="icon-sm"
-							onClick={onToggleEnabled}
-							disabled={toggleDisabled}
-							aria-label={enabled ? "Pause" : "Resume"}
+							disabled={readOnly}
+							aria-label={t({
+								message: "More actions",
+							})}
 						>
-							{enabled ? (
-								<LuPause className="size-4" />
-							) : (
-								<LuPlay className="size-4" />
-							)}
+							<LuEllipsis className="size-4" />
 						</Button>
-					</TooltipTrigger>
-					<TooltipContent>{enabled ? "Pause" : "Resume"}</TooltipContent>
-				</Tooltip>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							variant="ghost"
-							size="icon-sm"
-							onClick={onDelete}
+					</DropdownMenuTrigger>
+					<DropdownMenuContent align="end">
+						<DropdownMenuItem
+							variant="destructive"
 							disabled={deleteDisabled}
-							aria-label="Delete"
+							onSelect={onDelete}
 						>
 							<LuTrash2 className="size-4" />
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent>Delete</TooltipContent>
-				</Tooltip>
+							<Trans>Delete automation</Trans>
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
 				<div className="mx-1 h-4 w-px bg-border" />
-				<Button
-					variant="outline"
-					size="sm"
-					className="h-8 gap-1.5 px-3"
-					onClick={onRunNow}
-					disabled={runNowDisabled}
-				>
-					<LuPlay className="size-4" />
-					<span>Run now</span>
-				</Button>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<span className="inline-flex">
+							<Button
+								variant="outline"
+								size="sm"
+								className="h-8 gap-1.5 px-3"
+								onClick={onRunNow}
+								disabled={readOnly || runNowDisabled}
+							>
+								<LuPlay className="size-4" />
+								<span>
+									<Trans>Run now</Trans>
+								</span>
+							</Button>
+						</span>
+					</TooltipTrigger>
+					{readOnly && (
+						<TooltipContent>
+							<Trans>Only the owner can run this automation</Trans>
+						</TooltipContent>
+					)}
+				</Tooltip>
 			</div>
 		</header>
 	);

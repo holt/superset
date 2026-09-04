@@ -1,18 +1,30 @@
 export { useEventBus } from "./hooks/useEventBus";
 export { useGitChangeEvents } from "./hooks/useGitChangeEvents";
 export {
+	type AgentBindingsChangedPayload,
 	type AgentIdentity,
 	type AgentLifecyclePayload,
 	type EventBusHandle,
 	type GitChangedPayload,
 	getEventBus,
+	type HostConnectionState,
+	type HostConnectionStatus,
+	type PageWatchChangedPayload,
 	type PortChangedPayload,
 	type ProjectChangedPayload,
 	type ProjectSnapshotPayload,
+	reconnectEventBusIfDown,
+	type TagFoldersChangedPayload,
 	type TerminalLifecyclePayload,
 	type WorkspaceChangedPayload,
+	type WorkspaceCreateSettledPayload,
 	type WorkspaceSnapshotPayload,
 } from "./lib/eventBus";
+export {
+	createHostServiceLinks,
+	type HostServiceLinkOptions,
+	isMethodOverrideRejection,
+} from "./lib/hostServiceLinks";
 export {
 	primeRelayAffinity,
 	type RelayAffinityProbe,

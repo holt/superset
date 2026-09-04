@@ -2,7 +2,10 @@ import { COMPANY } from "@superset/shared/constants";
 import { getBlogPosts } from "@/lib/blog";
 import { getComparisonPages } from "@/lib/compare";
 import { PRODUCT_SUMMARY, stripMdxSyntax } from "@/lib/llms";
-import { FAQ_ITEMS } from "../components/FAQSection/constants";
+import {
+	FAQ_ITEMS,
+	faqSourceText,
+} from "../[lang]/components/FAQSection/constants";
 
 export async function GET() {
 	const posts = getBlogPosts();
@@ -17,7 +20,7 @@ export async function GET() {
 		[
 			`# ${COMPANY.NAME}`,
 			"",
-			"> Run 10+ parallel coding agents on your machine",
+			"> Run 100+ parallel coding agents on your machine",
 			"",
 			PRODUCT_SUMMARY,
 			"",
@@ -79,9 +82,9 @@ export async function GET() {
 			"# FAQ",
 			"",
 			...FAQ_ITEMS.flatMap((item) => [
-				`## ${item.question}`,
+				`## ${faqSourceText(item.question)}`,
 				"",
-				item.answer,
+				faqSourceText(item.answer),
 				"",
 			]),
 		].join("\n"),

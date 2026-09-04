@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import { ScrollArea } from "@superset/ui/scroll-area";
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
@@ -6,6 +7,7 @@ import { GoIssueClosed, GoIssueOpened } from "react-icons/go";
 import { MarkdownRenderer } from "renderer/components/MarkdownRenderer";
 import { useHostUrl } from "renderer/hooks/host-service/useHostTargetUrl";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
+import { resolveProjectFilterParams } from "renderer/routes/_authenticated/_dashboard/components/ProjectFilter/project-filter-utils";
 import { WorkItemDetailHeader } from "renderer/routes/_authenticated/_dashboard/components/WorkItemDetailHeader";
 import { WorkItemDetailState } from "renderer/routes/_authenticated/_dashboard/components/WorkItemDetailState";
 import { useProjectHost } from "renderer/routes/_authenticated/_dashboard/hooks/useProjectHost";
@@ -25,6 +27,7 @@ export const Route = createFileRoute(
 });
 
 function IssueDetailPage() {
+	const { t } = useLingui();
 	const { issueNumber: issueNumberRaw } = Route.useParams();
 	const issueNumber = parsePositiveIntegerParam(issueNumberRaw);
 	const search = TasksLayoutRoute.useSearch();
@@ -37,9 +40,14 @@ function IssueDetailPage() {
 	} = useProjectHost(projectId);
 	const hostUrl = useHostUrl(hostId ?? undefined);
 	const updateDraft = useNewWorkspaceDraftStore((state) => state.updateDraft);
+	const selectProject = useNewWorkspaceDraftStore(
+		(state) => state.selectProject,
+	);
 	const resetDraft = useNewWorkspaceDraftStore((state) => state.resetDraft);
 	const openModal = useOpenNewWorkspaceModal();
 
+	// `project` identifies this issue's repo, not the list filter: falling back
+	// to it would rewrite an "all repositories" view to a single repo on back.
 	const backSearch = useMemo(
 		() =>
 			tasksSearchFromFilters({
@@ -47,15 +55,15 @@ function IssueDetailPage() {
 				assignee: search.assignee ?? null,
 				search: search.search ?? "",
 				typeTab: "issues",
-				projectFilter: projectId,
+				projectFilters: resolveProjectFilterParams(search.projects, null, []),
 				linearProjectFilter: search.linearProject ?? null,
 				includeClosedIssues: search.state === "all",
 			}),
 		[
-			projectId,
 			search.assignee,
 			search.linearProject,
 			search.search,
+			search.projects,
 			search.state,
 			search.tab,
 		],
@@ -72,7 +80,6 @@ function IssueDetailPage() {
 			});
 		},
 		enabled: !!hostUrl && !!project && !!projectId && issueNumber !== null,
-		retry: false,
 		staleTime: 30_000,
 		gcTime: 10 * 60_000,
 	});
@@ -92,11 +99,8 @@ function IssueDetailPage() {
 			state: data.state.toLowerCase() === "closed" ? "closed" : "open",
 		};
 		resetDraft();
-		updateDraft({
-			selectedProjectId: projectId,
-			hostId,
-			linkedIssues: [linkedIssue],
-		});
+		selectProject(projectId);
+		updateDraft({ hostId, linkedIssues: [linkedIssue] });
 		openModal(projectId);
 	};
 
@@ -107,8 +111,12 @@ function IssueDetailPage() {
 		<WorkItemDetailHeader
 			itemNumber={data?.number ?? issueNumber}
 			icon={<StateIcon className={`size-4 shrink-0 ${stateIconClass}`} />}
-			backLabel="Back to GitHub issues"
-			externalLabel="Open issue in GitHub"
+			backLabel={t({
+				message: "Back to GitHub issues",
+			})}
+			externalLabel={t({
+				message: "Open issue in GitHub",
+			})}
 			url={data?.url ?? null}
 			onBack={handleBack}
 			onAddToWorkspace={data ? handleAddToWorkspace : null}
@@ -119,7 +127,12 @@ function IssueDetailPage() {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col">
 				{header}
-				<WorkItemDetailState message="This issue link is invalid." isError />
+				<WorkItemDetailState
+					message={t({
+						message: "This issue link is invalid.",
+					})}
+					isError
+				/>
 			</div>
 		);
 	}
@@ -128,7 +141,12 @@ function IssueDetailPage() {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col">
 				{header}
-				<WorkItemDetailState message="Choose a project from GitHub issues before opening an issue." />
+				<WorkItemDetailState
+					message={t({
+						message:
+							"Choose a project from GitHub issues before opening an issue.",
+					})}
+				/>
 			</div>
 		);
 	}
@@ -140,8 +158,13 @@ function IssueDetailPage() {
 				<WorkItemDetailState
 					message={
 						areProjectsReady
-							? "This project is no longer available on your devices."
-							: "Loading project…"
+							? t({
+									message:
+										"This project is no longer available on your devices.",
+								})
+							: t({
+									message: "Loading project…",
+								})
 					}
 					isLoading={!areProjectsReady}
 					isError={areProjectsReady}
@@ -155,7 +178,9 @@ function IssueDetailPage() {
 			<div className="flex min-h-0 flex-1 flex-col">
 				{header}
 				<WorkItemDetailState
-					message="The device that hosts this project is unavailable."
+					message={t({
+						message: "The device that hosts this project is unavailable.",
+					})}
 					isError
 				/>
 			</div>
@@ -166,7 +191,12 @@ function IssueDetailPage() {
 		return (
 			<div className="flex min-h-0 flex-1 flex-col">
 				{header}
-				<WorkItemDetailState message="Loading issue…" isLoading />
+				<WorkItemDetailState
+					message={t({
+						message: "Loading issue…",
+					})}
+					isLoading
+				/>
 			</div>
 		);
 	}
@@ -176,7 +206,13 @@ function IssueDetailPage() {
 			<div className="flex min-h-0 flex-1 flex-col">
 				{header}
 				<WorkItemDetailState
-					message={error instanceof Error ? error.message : "Issue not found."}
+					message={
+						error instanceof Error
+							? error.message
+							: t({
+									message: "Issue not found.",
+								})
+					}
 					isError
 					onRetry={() => void refetch()}
 				/>
@@ -201,7 +237,9 @@ function IssueDetailPage() {
 						{data.author && (
 							<>
 								<span aria-hidden>·</span>
-								<span className="min-w-0 break-words">by {data.author}</span>
+								<span className="min-w-0 break-words">
+									<Trans>by {data.author}</Trans>
+								</span>
 							</>
 						)}
 					</div>
@@ -210,7 +248,7 @@ function IssueDetailPage() {
 						<MarkdownRenderer content={data.body} />
 					) : (
 						<p className="text-sm italic text-muted-foreground">
-							No description provided.
+							<Trans>No description provided.</Trans>
 						</p>
 					)}
 				</div>

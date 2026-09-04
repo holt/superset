@@ -23,6 +23,7 @@ import {
 } from "@superset/pty-daemon/protocol";
 import {
 	DaemonSupervisor,
+	probeDaemonHelloWithRetry,
 	probeDaemonVersion,
 	ptyDaemonSocketPath,
 	shouldKillStaleDaemonForDev,
@@ -204,6 +205,96 @@ describe("probeDaemonVersion", () => {
 			}
 		} finally {
 			await fake.close();
+		}
+	});
+});
+
+describe("probeDaemonHelloWithRetry stopWhenNoListener", () => {
+	const deadSocket = () =>
+		path.join(
+			os.tmpdir(),
+			`nonexistent-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`,
+		);
+
+	test("without the flag, retries through refused connects for the whole budget", async () => {
+		// The handoff path depends on this: probes must survive the brief
+		// predecessor-exit → successor-bind gap where every connect is refused.
+		const started = Date.now();
+		const probe = await probeDaemonHelloWithRetry(deadSocket(), 400);
+		expect(probe).toBeNull();
+		expect(Date.now() - started).toBeGreaterThanOrEqual(350);
+	});
+
+	test("with the flag, a refused connect ends the retry loop immediately", async () => {
+		// The adoption-escalation path depends on this: a daemon that died
+		// mid-probe must cost ~one attempt, not the whole escalated budget.
+		const started = Date.now();
+		const probe = await probeDaemonHelloWithRetry(deadSocket(), 5_000, {
+			stopWhenNoListener: true,
+		});
+		expect(probe).toBeNull();
+		expect(Date.now() - started).toBeLessThan(1_000);
+	});
+
+	test("with the flag, a silent-but-accepting listener still gets the whole budget", async () => {
+		const fake = await startFakeDaemon({ silent: true });
+		const started = Date.now();
+		try {
+			const probe = await probeDaemonHelloWithRetry(fake.socketPath, 600, {
+				perAttemptTimeoutMs: 200,
+				stopWhenNoListener: true,
+			});
+			expect(probe).toBeNull();
+			expect(Date.now() - started).toBeGreaterThanOrEqual(550);
+		} finally {
+			await fake.close();
+		}
+	});
+
+	test("honors the per-attempt cap: adopts a hello slower than the default attempt", async () => {
+		// A CPU-starved daemon can need more than VERSION_PROBE_TIMEOUT_MS to
+		// answer one hello; only a raised per-attempt cap can ever adopt it.
+		const socketPath = deadSocket();
+		const server = net.createServer((sock) => {
+			const decoder = new FrameDecoder();
+			sock.on("error", () => {});
+			sock.on("data", (chunk: Buffer) => {
+				decoder.push(chunk);
+				for (const decoded of decoder.drain()) {
+					if ((decoded.message as ClientMessage).type !== "hello") continue;
+					setTimeout(() => {
+						if (sock.destroyed) return;
+						sock.write(
+							encodeFrame({
+								type: "hello-ack",
+								protocol: 1,
+								daemonVersion: "0.1.0",
+								daemonPid: process.pid,
+							}),
+						);
+					}, 400);
+				}
+			});
+		});
+		await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+		try {
+			// One 200ms attempt can never catch a 400ms hello…
+			expect(
+				await probeDaemonHelloWithRetry(socketPath, 300, {
+					perAttemptTimeoutMs: 200,
+					stopWhenNoListener: true,
+				}),
+			).toBeNull();
+			// …a 600ms attempt does.
+			const probe = await probeDaemonHelloWithRetry(socketPath, 1_000, {
+				perAttemptTimeoutMs: 600,
+				stopWhenNoListener: true,
+			});
+			expect(probe?.daemonVersion).toBe("0.1.0");
+		} finally {
+			await new Promise<void>((resolve) => {
+				server.close(() => resolve());
+			});
 		}
 	});
 });
@@ -1334,7 +1425,7 @@ describe("ptyDaemonSocketPath", () => {
 		return path.join(os.tmpdir(), `superset-ptyd-${shortId}.sock`);
 	};
 
-	test("every production home keeps the legacy org-only path", () => {
+	test("default production homes keep the legacy org-only path", () => {
 		expect(ptyDaemonSocketPath(ORG, { NODE_ENV: "production" })).toBe(
 			legacyPath(),
 		);
@@ -1344,12 +1435,63 @@ describe("ptyDaemonSocketPath", () => {
 				SUPERSET_HOME_DIR: path.join(os.homedir(), ".superset"),
 			}),
 		).toBe(legacyPath());
+	});
+
+	test("equivalent spellings of one custom home share a socket", () => {
+		const canonical = ptyDaemonSocketPath(ORG, {
+			NODE_ENV: "production",
+			SUPERSET_HOME_DIR: "/tmp/custom-home-alias",
+		});
 		expect(
 			ptyDaemonSocketPath(ORG, {
 				NODE_ENV: "production",
-				SUPERSET_HOME_DIR: "/tmp/custom-production-home",
+				SUPERSET_HOME_DIR: "/tmp/custom-home-alias/",
 			}),
-		).toBe(legacyPath());
+		).toBe(canonical);
+		expect(
+			ptyDaemonSocketPath(ORG, {
+				NODE_ENV: "production",
+				SUPERSET_HOME_DIR: "/tmp/elsewhere/../custom-home-alias",
+			}),
+		).toBe(canonical);
+	});
+
+	test("any non-default home is namespaced, regardless of NODE_ENV", () => {
+		// Two instances of the same org must never share a socket — a test
+		// or custom-home instance on the org-only socket can adopt/reap/kill
+		// another instance's PTYs. Existing daemons stay adoptable through
+		// the manifest's stored socketPath, so this costs no continuity.
+		for (const NODE_ENV of ["production", "test", undefined]) {
+			expect(
+				ptyDaemonSocketPath(ORG, {
+					NODE_ENV,
+					SUPERSET_HOME_DIR: "/tmp/custom-home-a",
+				}),
+			).not.toBe(legacyPath());
+		}
+	});
+
+	test("test-runner contexts require an isolated home", () => {
+		expect(() => ptyDaemonSocketPath(ORG, { NODE_ENV: "test" })).toThrow(
+			/isolated temp dir/,
+		);
+		expect(() =>
+			ptyDaemonSocketPath(ORG, {
+				NODE_ENV: "test",
+				SUPERSET_HOME_DIR: path.join(os.homedir(), ".superset"),
+			}),
+		).toThrow(/isolated temp dir/);
+		expect(() =>
+			ptyDaemonSocketPath(ORG, {
+				NODE_TEST_CONTEXT: "child-v8",
+			} as NodeJS.ProcessEnv),
+		).toThrow(/isolated temp dir/);
+		expect(
+			ptyDaemonSocketPath(ORG, {
+				NODE_ENV: "test",
+				SUPERSET_HOME_DIR: "/tmp/isolated-test-home",
+			}),
+		).not.toBe(legacyPath());
 	});
 
 	test("non-default development homes get their own stable daemon socket", () => {

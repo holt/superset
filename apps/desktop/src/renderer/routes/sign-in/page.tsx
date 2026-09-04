@@ -1,3 +1,4 @@
+import { Trans } from "@lingui/react/macro";
 import { type AuthProvider, COMPANY } from "@superset/shared/constants";
 import {
 	DEV_EMAIL,
@@ -7,10 +8,11 @@ import {
 import { Badge } from "@superset/ui/badge";
 import { Button } from "@superset/ui/button";
 import { Spinner } from "@superset/ui/spinner";
-import { createFileRoute, Navigate, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { FaGithub } from "react-icons/fa";
 import { FcGoogle } from "react-icons/fc";
+import { Redirect } from "renderer/components/Redirect";
 import { env } from "renderer/env.renderer";
 import { useDelayElapsed } from "renderer/hooks/useDelayElapsed";
 import { track } from "renderer/lib/analytics";
@@ -25,8 +27,7 @@ export const Route = createFileRoute("/sign-in/")({
 
 const LAST_USED_METHOD_KEY = "superset-last-auth-method";
 
-// Hoisted for stable props identity — <Navigate> re-navigates every re-render otherwise (react error #185 loop, #5729)
-const workspaceRedirect = <Navigate to="/workspace" replace />;
+const workspaceRedirect = <Redirect to="/workspace" replace />;
 
 const SESSION_PENDING_TIMEOUT_MS = 15_000;
 
@@ -146,7 +147,11 @@ function SignInPage() {
 		}
 	};
 
-	const lastUsedBadge = <Badge variant="secondary">Last used</Badge>;
+	const lastUsedBadge = (
+		<Badge variant="secondary">
+			<Trans>Last used</Trans>
+		</Badge>
+	);
 
 	return (
 		<div className="flex flex-col h-full w-full bg-background">
@@ -160,12 +165,14 @@ function SignInPage() {
 
 					<div className="text-center mb-8">
 						<h1 className="text-xl font-semibold text-foreground mb-2">
-							Welcome to Superset
+							<Trans>Welcome to Superset</Trans>
 						</h1>
 						<p className="text-sm text-muted-foreground">
-							{hasLocalToken
-								? "Restoring your session"
-								: "Sign in to get started"}
+							{hasLocalToken ? (
+								<Trans>Restoring your session</Trans>
+							) : (
+								<Trans>Sign in to get started</Trans>
+							)}
 						</p>
 					</div>
 
@@ -197,7 +204,7 @@ function SignInPage() {
 							disabled={signInMutation.isPending}
 						>
 							<FaGithub className="size-5" />
-							Continue with GitHub
+							<Trans>Continue with GitHub</Trans>
 							{lastUsedMethod === "github" && lastUsedBadge}
 						</Button>
 
@@ -209,30 +216,32 @@ function SignInPage() {
 							disabled={signInMutation.isPending}
 						>
 							<FcGoogle className="size-5" />
-							Continue with Google
+							<Trans>Continue with Google</Trans>
 							{lastUsedMethod === "google" && lastUsedBadge}
 						</Button>
 					</div>
 
 					<p className="mt-8 text-xs text-muted-foreground/70 text-center max-w-xs">
-						By signing in, you agree to our{" "}
-						<a
-							href={COMPANY.TERMS_URL}
-							target="_blank"
-							rel="noopener noreferrer"
-							className="underline hover:text-muted-foreground transition-colors"
-						>
-							Terms of Service
-						</a>{" "}
-						and{" "}
-						<a
-							href={COMPANY.PRIVACY_URL}
-							target="_blank"
-							rel="noopener noreferrer"
-							className="underline hover:text-muted-foreground transition-colors"
-						>
-							Privacy Policy
-						</a>
+						<Trans>
+							By signing in, you agree to our{" "}
+							<a
+								href={COMPANY.TERMS_URL}
+								target="_blank"
+								rel="noopener noreferrer"
+								className="underline hover:text-muted-foreground transition-colors"
+							>
+								Terms of Service
+							</a>{" "}
+							and{" "}
+							<a
+								href={COMPANY.PRIVACY_URL}
+								target="_blank"
+								rel="noopener noreferrer"
+								className="underline hover:text-muted-foreground transition-colors"
+							>
+								Privacy Policy
+							</a>
+						</Trans>
 					</p>
 				</div>
 			</div>

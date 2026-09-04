@@ -1,4 +1,3 @@
-import type { HarnessKind, StopReason } from "@superset/session-protocol";
 import type {
 	AgentDefinitionId,
 	AgentIdentityId,
@@ -8,6 +7,7 @@ import { sql } from "drizzle-orm";
 import {
 	index,
 	integer,
+	primaryKey,
 	sqliteTable,
 	text,
 	uniqueIndex,
@@ -56,6 +56,13 @@ export const terminalAgentBindings = sqliteTable(
 		startedAt: integer("started_at").notNull(),
 		lastEventAt: integer("last_event_at").notNull(),
 		lastEventType: text("last_event_type").notNull(),
+		// Set when the agent session ended. "detached" = the agent reported its
+		// own end (SessionEnd hook) — not resumable; "terminal-exited" = the
+		// terminal died under it (kill, crash, reboot) — resume candidate;
+		// "resumed" = the candidate was consumed by an auto-resume; "disposed"
+		// = deliberately killed (pane close, CLI kill) — never resumable.
+		endedAt: integer("ended_at"),
+		endReason: text("end_reason"),
 	},
 	(table) => [
 		index("terminal_agent_bindings_workspace_id_idx").on(table.workspaceId),
@@ -80,10 +87,16 @@ export const projects = sqliteTable(
 		// Custom project icon as a small downscaled data-URI. Null falls back to
 		// the GitHub owner avatar (when a repo is linked) or a placeholder.
 		icon: text("icon"),
+		// Accent color as a `#rrggbb` hex. Null means the default (no accent).
+		color: text("color"),
 		// JSON array of repo-relative folders to cone-mode sparse-checkout into
 		// new worktrees. Null (the default) means a full checkout. Read through
 		// `parseSparseCheckoutPaths` — the encoding is not part of the API.
 		sparseCheckoutPaths: text("sparse_checkout_paths"),
+		// Free-text instructions injected into AI workspace/branch naming for
+		// this project (e.g. "include the Linear ticket id in the branch name").
+		// Null means the default naming behavior.
+		namingInstructions: text("naming_instructions"),
 		// Empty string means "not yet backfilled" — the startup sweep targets
 		// these rows (name from cloud legacy row if reachable, else basename).
 		name: text().notNull().default(""),
@@ -107,6 +120,10 @@ export const hostSettings = sqliteTable("host_settings", {
 	worktreeBaseDir: text("worktree_base_dir"),
 	branchPrefixMode: text("branch_prefix_mode").$type<BranchPrefixMode>(),
 	branchPrefixCustom: text("branch_prefix_custom"),
+	// Which provider login newly launched agents use, as the profile dir to
+	// inject (CLAUDE_CONFIG_DIR / CODEX_HOME). Null = the system default login.
+	defaultClaudeConfigDir: text("default_claude_config_dir"),
+	defaultCodexHome: text("default_codex_home"),
 });
 
 export const pullRequests = sqliteTable(
@@ -129,6 +146,9 @@ export const pullRequests = sqliteTable(
 		reviewDecision: text("review_decision"),
 		checksStatus: text("checks_status").notNull().default("none"),
 		checksJson: text("checks_json").notNull().default("[]"),
+		// Set when the PR is first observed merged; never cleared. Anchors
+		// "merged in the last N days" windows on the workspaces board.
+		mergedAt: integer("merged_at"),
 		lastFetchedAt: integer("last_fetched_at"),
 		error: text(),
 		createdAt: integer("created_at")
@@ -169,6 +189,11 @@ export const hostAgentConfigs = sqliteTable(
 		argsJson: text("args_json").notNull().default("[]"),
 		promptTransport: text("prompt_transport").notNull(),
 		promptArgsJson: text("prompt_args_json").notNull().default("[]"),
+		// Args that resume a previous session; the session id is appended after
+		// them. Empty means the agent has no id-based resume.
+		resumeArgsJson: text("resume_args_json").notNull().default("[]"),
+		// Args that fork a previous session into a new provider session id.
+		forkArgsJson: text("fork_args_json").notNull().default("[]"),
 		envJson: text("env_json").notNull().default("{}"),
 		displayOrder: integer("display_order").notNull(),
 		createdAt: integer("created_at")
@@ -187,9 +212,11 @@ export const workspaces = sqliteTable(
 	"workspaces",
 	{
 		id: text().primaryKey(),
-		projectId: text("project_id")
-			.notNull()
-			.references(() => projects.id, { onDelete: "cascade" }),
+		// Null = a project-less "session" workspace (managed folder under
+		// ~/.superset/sessions, its own standalone git repo).
+		projectId: text("project_id").references(() => projects.id, {
+			onDelete: "cascade",
+		}),
 		worktreePath: text("worktree_path").notNull(),
 		branch: text().notNull(),
 		headSha: text("head_sha"),
@@ -208,7 +235,10 @@ export const workspaces = sqliteTable(
 		// Empty string means "not yet backfilled from cloud" — the startup
 		// backfill sweep targets these rows.
 		name: text().notNull().default(""),
-		type: text().$type<"main" | "worktree">().notNull().default("worktree"),
+		type: text()
+			.$type<"main" | "worktree" | "session">()
+			.notNull()
+			.default("worktree"),
 		taskId: text("task_id"),
 		createdByUserId: text("created_by_user_id"),
 		createdAt: integer("created_at")
@@ -216,12 +246,23 @@ export const workspaces = sqliteTable(
 			.$defaultFn(() => Date.now()),
 		// 0 means "predates local ownership"; write paths always set it.
 		updatedAt: integer("updated_at").notNull().default(0),
+		// Epoch ms of the newest agent lifecycle event in this workspace (see
+		// touchLocalWorkspaceActivity). Distinct from updatedAt, which only
+		// moves on metadata writes. Inserts stamp creation as the first
+		// activity; rows that predate the column stay null and consumers fall
+		// back to updatedAt.
+		lastActivityAt: integer("last_activity_at").$defaultFn(() => Date.now()),
 		// Null = local changes not yet pushed to the cloud mirror (dual-write
 		// era only; the column and reconciler go away in R3).
-		cloudSyncedAt: integer("cloud_synced_at"),
+		// Tombstone: null = live. Set at the destroy commit point; rows are
+		// kept forever and surface on the board's Merged/Deleted columns.
+		archivedAt: integer("archived_at"),
+		// "merged" when the linked PR was merged at destroy time.
+		archiveReason: text("archive_reason").$type<"merged" | "deleted">(),
 	},
 	(table) => [
 		index("workspaces_project_id_idx").on(table.projectId),
+		index("workspaces_archived_at_idx").on(table.archivedAt),
 		index("workspaces_upstream_ref_idx").on(
 			table.upstreamOwner,
 			table.upstreamRepo,
@@ -235,37 +276,81 @@ export const workspaces = sqliteTable(
 );
 
 /**
- * Registry of ACP agent sessions (docs/acp-sessions.md). One row per
- * session, kept fresh on every state emit. Rows survive host restarts so the
- * manager can list them as `offline` and resurrect on demand via the
- * adapter's `session/load` — the journal itself is not persisted; transcript
- * replay comes from the agent harness's own on-disk session store.
+ * Host-local presentation for a tag folder. A row exists only once someone
+ * customises the folder (same lifecycle as the old local row), beside the
+ * workspace tags it describes. `tag` stays the stable slug agents target;
+ * `display_name` is what the sidebar shows — which makes rename a one-row
+ * update instead of retagging every member.
+ *
+ * A folder is a (scope, tag) pair. `scope` is a project id, or the
+ * `SESSIONS_TAG_SCOPE` sentinel for the project-less Sessions lane — project
+ * ids are UUIDs, so the sentinel can never collide. Keying on one NOT NULL
+ * column (rather than a nullable `project_id`) keeps a single read path and
+ * sidesteps SQLite's quirk of permitting NULLs inside a PRIMARY KEY, which
+ * would silently allow duplicate session rows.
+ *
+ * The trade for dropping the old FK to `projects`: deleting a project no
+ * longer cascades here, so `project.remove` clears its rows explicitly.
  */
-export const acpSessions = sqliteTable(
-	"acp_sessions",
+export const tagFolderSettings = sqliteTable(
+	"tag_folder_settings",
 	{
-		sessionId: text("session_id").primaryKey(),
-		workspaceId: text("workspace_id").notNull(),
-		/** Adapter-side ACP session id — the `session/load` key. */
-		acpSessionId: text("acp_session_id").notNull(),
-		harness: text().notNull().$type<HarnessKind>(),
-		cwd: text().notNull(),
-		title: text(),
-		lastStopReason: text("last_stop_reason").$type<StopReason>(),
-		createdAt: integer("created_at").notNull(),
-		updatedAt: integer("updated_at").notNull(),
+		scope: text().notNull(),
+		tag: text().notNull(),
+		displayName: text("display_name"),
+		color: text(),
+		tabOrder: integer("tab_order"),
+		updatedAt: integer("updated_at")
+			.notNull()
+			.$defaultFn(() => Date.now()),
 	},
-	(table) => [index("acp_sessions_workspace_id_idx").on(table.workspaceId)],
+	(table) => [primaryKey({ columns: [table.scope, table.tag] })],
 );
 
 /**
- * Tombstones for workspaces deleted while the cloud was unreachable. The
- * reconciler drains this into `v2Workspace.delete` calls; rows are removed
- * once the cloud confirms. Dual-write era only — dropped in R3.
+ * Plain-string tags on workspaces — no tag entity, no tag ids. `tag` is
+ * stored already-normalized (trimmed + lowercased, see
+ * `@superset/shared/workspace-tags`); sidebar folders derive from these
+ * rows, so any actor that can tag a workspace can file it.
  */
-export const workspaceCloudDeletes = sqliteTable("workspace_cloud_deletes", {
-	id: text().primaryKey(),
-	queuedAt: integer("queued_at")
-		.notNull()
-		.$defaultFn(() => Date.now()),
-});
+export const workspaceTags = sqliteTable(
+	"workspace_tags",
+	{
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		tag: text().notNull(),
+		createdAt: integer("created_at")
+			.notNull()
+			.$defaultFn(() => Date.now()),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspaceId, table.tag] }),
+		index("workspace_tags_tag_idx").on(table.tag),
+	],
+);
+
+/**
+ * Every pull request a workspace has ever been linked to, append-only.
+ * `workspaces.pullRequestId` stays the single "currently linked" pointer the
+ * sidebar shows (and Remove PR Link clears); this table is the memory that
+ * survives the pointer moving on — a workspace that opens a PR per branch
+ * accumulates one row each. Unlinking hides a PR from the sidebar, never
+ * from here.
+ */
+export const workspacePullRequests = sqliteTable(
+	"workspace_pull_requests",
+	{
+		workspaceId: text("workspace_id")
+			.notNull()
+			.references(() => workspaces.id, { onDelete: "cascade" }),
+		pullRequestId: text("pull_request_id")
+			.notNull()
+			.references(() => pullRequests.id, { onDelete: "cascade" }),
+		linkedAt: integer("linked_at").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspaceId, table.pullRequestId] }),
+		index("workspace_pull_requests_workspace_idx").on(table.workspaceId),
+	],
+);

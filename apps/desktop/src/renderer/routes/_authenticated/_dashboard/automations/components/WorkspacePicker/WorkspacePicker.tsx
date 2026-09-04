@@ -1,4 +1,4 @@
-import type { SelectV2Host } from "@superset/db/schema";
+import { Trans, useLingui } from "@lingui/react/macro";
 import {
 	Command,
 	CommandGroup,
@@ -8,20 +8,26 @@ import {
 } from "@superset/ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@superset/ui/popover";
 import { cn } from "@superset/ui/utils";
-import { useLiveQuery } from "@tanstack/react-db";
 import { useMemo, useState } from "react";
 import { HiCheck } from "react-icons/hi2";
 import { LuGitBranch, LuSparkles, LuTriangleAlert } from "react-icons/lu";
 import { PickerTrigger } from "renderer/components/PickerTrigger";
-import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
+import { cloudTrpc } from "renderer/lib/cloud-trpc";
 import { useHostWorkspaces } from "renderer/routes/_authenticated/providers/HostWorkspacesProvider";
 
 interface WorkspacePickerProps {
 	hostId: string | null;
-	projectId: string | null;
+	/**
+	 * Null = session mode (list session workspaces, offer "New session").
+	 * Undefined = no project chosen yet — render neutral "New workspace" copy
+	 * and list nothing, so the pre-default loading window never looks like
+	 * session mode.
+	 */
+	projectId: string | null | undefined;
 	value: string | null;
 	onChange: (workspaceId: string | null) => void;
 	className?: string;
+	disabled?: boolean;
 }
 
 export function WorkspacePicker({
@@ -30,9 +36,10 @@ export function WorkspacePicker({
 	value,
 	onChange,
 	className,
+	disabled,
 }: WorkspacePickerProps) {
+	const { t } = useLingui();
 	const [open, setOpen] = useState(false);
-	const collections = useCollections();
 
 	const { workspaces: hostWorkspaces, isReady } = useHostWorkspaces();
 	const workspaceRows = useMemo(
@@ -44,16 +51,13 @@ export function WorkspacePicker({
 		[hostWorkspaces],
 	);
 
-	const { data: allHosts = [] } = useLiveQuery(
-		(q) => q.from({ h: collections.v2Hosts }).select(({ h }) => ({ ...h })),
-		[collections.v2Hosts],
-	);
+	const { data: hostRows = [] } = cloudTrpc.v2Host.list.useQuery(undefined);
 
-	const hostRows = allHosts as SelectV2Host[];
-
+	// Null projectId = session mode: offer the host's session workspaces
+	// (projectId null) as pin targets.
 	const workspaces = useMemo(
 		() =>
-			hostId && projectId
+			hostId && projectId !== undefined
 				? workspaceRows.filter(
 						(w) => w.hostId === hostId && w.projectId === projectId,
 					)
@@ -73,7 +77,9 @@ export function WorkspacePicker({
 		(selected.hostId !== hostId || selected.projectId !== projectId);
 	const offScopeHostName = offScope
 		? (hostRows.find((h) => h.machineId === selected.hostId)?.name ??
-			"another device")
+			t({
+				message: "another device",
+			}))
 		: null;
 	// A pinned value we can't resolve yet (live query still hydrating) is loading,
 	// not an empty "New workspace" selection — don't flash the wrong label/warning.
@@ -85,15 +91,28 @@ export function WorkspacePicker({
 	const label = selected
 		? selected.name
 		: resolving
-			? "Loading…"
+			? t({
+					message: "Loading…",
+				})
 			: missing
-				? "Workspace not found"
-				: "New workspace";
+				? t({
+						message: "Workspace not found",
+					})
+				: projectId === null
+					? t({
+							message: "New session",
+						})
+					: t({
+							message: "New workspace",
+						});
 
 	return (
-		<Popover open={open} onOpenChange={setOpen}>
+		// Guard the open state, not just the trigger: Radix opens on pointerdown,
+		// which Chromium still dispatches to fieldset-disabled buttons.
+		<Popover open={open} onOpenChange={(next) => !disabled && setOpen(next)}>
 			<PopoverTrigger asChild>
 				<PickerTrigger
+					disabled={disabled}
 					className={cn((offScope || missing) && "text-amber-500", className)}
 					icon={
 						offScope || missing ? (
@@ -114,7 +133,11 @@ export function WorkspacePicker({
 				className="w-60 p-0"
 			>
 				<Command>
-					<CommandInput placeholder="Search workspaces..." />
+					<CommandInput
+						placeholder={t({
+							message: "Search workspaces...",
+						})}
+					/>
 					<CommandList>
 						<CommandGroup>
 							<CommandItem
@@ -125,7 +148,13 @@ export function WorkspacePicker({
 								}}
 							>
 								<LuSparkles className="size-4" />
-								<span>New workspace</span>
+								<span>
+									{projectId === null ? (
+										<Trans>New session</Trans>
+									) : (
+										<Trans>New workspace</Trans>
+									)}
+								</span>
 								{!selected && !resolving && !missing && (
 									<HiCheck className="ml-auto size-4" />
 								)}
@@ -138,9 +167,11 @@ export function WorkspacePicker({
 								>
 									<LuTriangleAlert className="size-4" />
 									<span className="flex min-w-0 flex-col select-text cursor-text">
-										<span className="truncate">Workspace not found</span>
+										<span className="truncate">
+											<Trans>Workspace not found</Trans>
+										</span>
 										<span className="truncate text-[10px] text-amber-500/70">
-											deleted or unavailable — pick another
+											<Trans>deleted or unavailable — pick another</Trans>
 										</span>
 									</span>
 									<HiCheck className="ml-auto size-4" />
@@ -157,7 +188,7 @@ export function WorkspacePicker({
 									<span className="flex min-w-0 flex-col">
 										<span className="truncate">{selected.name}</span>
 										<span className="truncate text-[10px] text-amber-500/70">
-											on {offScopeHostName} — won't run here
+											<Trans>on {offScopeHostName} — won't run here</Trans>
 										</span>
 									</span>
 									<HiCheck className="ml-auto size-4" />

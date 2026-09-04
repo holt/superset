@@ -1,4 +1,7 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import type { HostAgentConfig } from "@superset/host-service/settings";
+import { errorMessage } from "@superset/i18n/errors";
+import { AGENT_TYPES } from "@superset/shared/agent-command";
 import type { PromptTransport } from "@superset/shared/agent-prompt-launch";
 import { getPresetById } from "@superset/shared/host-agent-presets";
 import {
@@ -15,8 +18,10 @@ import {
 import { Button } from "@superset/ui/button";
 import { Input } from "@superset/ui/input";
 import { toast } from "@superset/ui/sonner";
+import { Switch } from "@superset/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { useMutation } from "@tanstack/react-query";
-import { RotateCcw, Trash2 } from "lucide-react";
+import { Info, RotateCcw, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
 	getAgentCommandText,
@@ -24,6 +29,7 @@ import {
 	parseAgentCommandText,
 } from "renderer/lib/agent-launch-command";
 import { joinArgs, parseArgs } from "renderer/lib/argv";
+import { electronTrpc } from "renderer/lib/electron-trpc";
 import { getHostServiceClientByUrl } from "renderer/lib/host-service-client";
 import { getHostServiceUnavailableMessage } from "renderer/lib/host-service-unavailable";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
@@ -47,15 +53,47 @@ export function AgentDetail({
 	onChanged,
 	onDeleted,
 }: AgentDetailProps) {
+	const { t } = useLingui();
 	const hostService = useLocalHostService();
 	const { activeHostUrl } = hostService;
 	const isCustom = config.presetId === "custom";
 	const hasBundledDefault = getPresetById(config.presetId) !== undefined;
+	const isHooksSetupTarget = (AGENT_TYPES as readonly string[]).includes(
+		config.presetId,
+	);
+
+	const electronUtils = electronTrpc.useUtils();
+	const disabledHooksQuery =
+		electronTrpc.settings.getAgentHooksDisabled.useQuery(undefined, {
+			enabled: isHooksSetupTarget,
+		});
+	const hooksEnabled = !disabledHooksQuery.data?.includes(config.presetId);
+	const setHooksEnabledMutation =
+		electronTrpc.settings.setAgentHooksEnabled.useMutation({
+			onSettled: () => {
+				void electronUtils.settings.getAgentHooksDisabled.invalidate();
+			},
+			onError: (err) =>
+				toast.error(
+					errorMessage(
+						err,
+						t({
+							message: "Failed to update hooks",
+						}),
+					),
+				),
+		});
 
 	const [label, setLabel] = useState(config.label);
 	const [commandText, setCommandText] = useState(getAgentCommandText(config));
 	const [promptArgsText, setPromptArgsText] = useState(
 		joinArgs(config.promptArgs),
+	);
+	const [resumeArgsText, setResumeArgsText] = useState(
+		joinArgs(config.resumeArgs),
+	);
+	const [forkArgsText, setForkArgsText] = useState(
+		joinArgs(config.forkArgs ?? []),
 	);
 	const [promptTransport, setPromptTransport] = useState<PromptTransport>(
 		config.promptTransport,
@@ -71,6 +109,8 @@ export function AgentDetail({
 			}),
 		);
 		setPromptArgsText(joinArgs(config.promptArgs));
+		setResumeArgsText(joinArgs(config.resumeArgs));
+		setForkArgsText(joinArgs(config.forkArgs ?? []));
 		setPromptTransport(config.promptTransport);
 	}, [
 		config.label,
@@ -78,6 +118,8 @@ export function AgentDetail({
 		config.args,
 		config.env,
 		config.promptArgs,
+		config.resumeArgs,
+		config.forkArgs,
 		config.promptTransport,
 	]);
 
@@ -92,7 +134,7 @@ export function AgentDetail({
 			if (!activeHostUrl) {
 				throw new Error(
 					getHostServiceUnavailableMessage(hostService, {
-						action: "save the agent",
+						action: "saveAgent",
 					}),
 				);
 			}
@@ -102,7 +144,14 @@ export function AgentDetail({
 		},
 		onSuccess: (updated) => onChanged(updated),
 		onError: (err) =>
-			toast.error(err instanceof Error ? err.message : "Failed to save"),
+			toast.error(
+				errorMessage(
+					err,
+					t({
+						message: "Failed to save",
+					}),
+				),
+			),
 	});
 
 	const removeMutation = useMutation({
@@ -110,7 +159,7 @@ export function AgentDetail({
 			if (!activeHostUrl) {
 				throw new Error(
 					getHostServiceUnavailableMessage(hostService, {
-						action: "remove the agent",
+						action: "removeAgent",
 					}),
 				);
 			}
@@ -120,7 +169,14 @@ export function AgentDetail({
 		},
 		onSuccess: () => onDeleted(),
 		onError: (err) =>
-			toast.error(err instanceof Error ? err.message : "Failed to remove"),
+			toast.error(
+				errorMessage(
+					err,
+					t({
+						message: "Failed to remove",
+					}),
+				),
+			),
 	});
 
 	const restoreDefaultMutation = useMutation({
@@ -128,7 +184,7 @@ export function AgentDetail({
 			if (!activeHostUrl) {
 				throw new Error(
 					getHostServiceUnavailableMessage(hostService, {
-						action: "restore the agent defaults",
+						action: "restoreAgentDefaults",
 					}),
 				);
 			}
@@ -138,11 +194,21 @@ export function AgentDetail({
 		},
 		onSuccess: (updated) => {
 			onChanged(updated);
-			toast.success(`${updated.label} restored to defaults`);
+			const updatedLabel = updated.label;
+			toast.success(
+				t({
+					message: `${updatedLabel} restored to defaults`,
+				}),
+			);
 		},
 		onError: (err) =>
 			toast.error(
-				err instanceof Error ? err.message : "Failed to restore defaults",
+				errorMessage(
+					err,
+					t({
+						message: "Failed to restore defaults",
+					}),
+				),
 			),
 	});
 
@@ -156,7 +222,11 @@ export function AgentDetail({
 		const patch = parseAgentCommandText(commandText);
 		const { command } = patch;
 		if (command.length === 0) {
-			toast.error("Command cannot be empty");
+			toast.error(
+				t({
+					message: "Command cannot be empty",
+				}),
+			);
 			setCommandText(getAgentCommandText(config));
 			return;
 		}
@@ -171,6 +241,22 @@ export function AgentDetail({
 			args.length !== config.promptArgs.length ||
 			args.some((arg, i) => arg !== config.promptArgs[i]);
 		if (changed) updateMutation.mutate({ promptArgs: args });
+	};
+
+	const handleResumeArgsBlur = () => {
+		const args = parseArgs(resumeArgsText);
+		const changed =
+			args.length !== config.resumeArgs.length ||
+			args.some((arg, i) => arg !== config.resumeArgs[i]);
+		if (changed) updateMutation.mutate({ resumeArgs: args });
+	};
+
+	const handleForkArgsBlur = () => {
+		const args = parseArgs(forkArgsText);
+		const changed =
+			args.length !== (config.forkArgs ?? []).length ||
+			args.some((arg, i) => arg !== (config.forkArgs ?? [])[i]);
+		if (changed) updateMutation.mutate({ forkArgs: args });
 	};
 
 	const handleTransportChange = (next: PromptTransport) => {
@@ -193,7 +279,11 @@ export function AgentDetail({
 			/>
 
 			<div className="space-y-6">
-				<Section title="Label">
+				<Section
+					title={t({
+						message: "Label",
+					})}
+				>
 					<Input
 						id={`label-${config.id}`}
 						value={label}
@@ -203,7 +293,11 @@ export function AgentDetail({
 				</Section>
 
 				{isCustom ? (
-					<Section title="Icon">
+					<Section
+						title={t({
+							message: "Icon",
+						})}
+					>
 						<AgentIconPicker
 							value={config.iconId}
 							onChange={(iconId) => updateMutation.mutate({ iconId })}
@@ -220,18 +314,78 @@ export function AgentDetail({
 					promptArgsText={promptArgsText}
 					onPromptArgsTextChange={setPromptArgsText}
 					onPromptArgsBlur={handlePromptArgsBlur}
+					resumeArgsText={resumeArgsText}
+					onResumeArgsTextChange={setResumeArgsText}
+					onResumeArgsBlur={handleResumeArgsBlur}
+					forkArgsText={forkArgsText}
+					onForkArgsTextChange={setForkArgsText}
+					onForkArgsBlur={handleForkArgsBlur}
 					promptTransport={promptTransport}
 					onPromptTransportChange={handleTransportChange}
 				/>
 
-				{hasBundledDefault ? (
-					<div className="pt-2 border-t border-border">
+				{isHooksSetupTarget ? (
+					<div className="pt-2">
 						<div className="flex items-center justify-between gap-8">
 							<div className="min-w-0 flex-1">
-								<div className="text-sm font-medium">Restore default</div>
+								<div className="flex items-center gap-1.5">
+									<div className="text-sm font-medium">
+										<Trans>Superset hooks</Trans>
+									</div>
+									<Tooltip>
+										<TooltipTrigger asChild>
+											<Info className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+										</TooltipTrigger>
+										<TooltipContent side="top" className="max-w-[320px]">
+											<Trans>
+												Registers lifecycle hooks in this agent's global config
+												so Superset can show status and send notifications.
+												Turning this off removes Superset's entries everywhere —
+												status and notifications stop for this agent, including
+												inside Superset.
+											</Trans>
+										</TooltipContent>
+									</Tooltip>
+								</div>
 								<p className="text-sm text-muted-foreground mt-0.5">
-									Replace this agent's launch settings with the current bundled
-									configuration.
+									<Trans>
+										Show status and send notifications for this agent.
+									</Trans>
+								</p>
+							</div>
+							<Switch
+								aria-label={t({
+									message: "Superset hooks",
+								})}
+								checked={hooksEnabled}
+								onCheckedChange={(enabled) =>
+									setHooksEnabledMutation.mutate({
+										agentId: config.presetId,
+										enabled,
+									})
+								}
+								disabled={
+									disabledHooksQuery.isLoading ||
+									setHooksEnabledMutation.isPending
+								}
+								className="shrink-0"
+							/>
+						</div>
+					</div>
+				) : null}
+
+				{hasBundledDefault ? (
+					<div className="pt-2">
+						<div className="flex items-center justify-between gap-8">
+							<div className="min-w-0 flex-1">
+								<div className="text-sm font-medium">
+									<Trans>Restore default</Trans>
+								</div>
+								<p className="text-sm text-muted-foreground mt-0.5">
+									<Trans>
+										Replace this agent's launch settings with the current
+										bundled configuration.
+									</Trans>
 								</p>
 							</div>
 							<AlertDialog>
@@ -243,26 +397,30 @@ export function AgentDetail({
 										className="shrink-0 gap-1.5"
 									>
 										<RotateCcw className="size-3.5" />
-										Restore
+										<Trans>Restore</Trans>
 									</Button>
 								</AlertDialogTrigger>
 								<AlertDialogContent>
 									<AlertDialogHeader>
 										<AlertDialogTitle>
-											Restore {config.label} to defaults?
+											<Trans>Restore {config.label} to defaults?</Trans>
 										</AlertDialogTitle>
 										<AlertDialogDescription>
-											This replaces its label, command, arguments, prompt
-											settings, environment variables, and icon with the current
-											bundled configuration.
+											<Trans>
+												This replaces its label, command, arguments, prompt and
+												resume settings, environment variables, and icon with
+												the current bundled configuration.
+											</Trans>
 										</AlertDialogDescription>
 									</AlertDialogHeader>
 									<AlertDialogFooter>
-										<AlertDialogCancel>Cancel</AlertDialogCancel>
+										<AlertDialogCancel>
+											<Trans>Cancel</Trans>
+										</AlertDialogCancel>
 										<AlertDialogAction
 											onClick={() => restoreDefaultMutation.mutate()}
 										>
-											Restore defaults
+											<Trans>Restore defaults</Trans>
 										</AlertDialogAction>
 									</AlertDialogFooter>
 								</AlertDialogContent>
@@ -271,14 +429,14 @@ export function AgentDetail({
 					</div>
 				) : null}
 
-				<div
-					className={hasBundledDefault ? "pt-6" : "pt-2 border-t border-border"}
-				>
+				<div className={hasBundledDefault ? "pt-6" : "pt-2"}>
 					<div className="flex items-center justify-between gap-8">
 						<div className="min-w-0 flex-1">
-							<div className="text-sm font-medium">Delete agent</div>
+							<div className="text-sm font-medium">
+								<Trans>Delete agent</Trans>
+							</div>
 							<p className="text-sm text-muted-foreground mt-0.5">
-								Removes this agent from this device only.
+								<Trans>Removes this agent from this device only.</Trans>
 							</p>
 						</div>
 						<Button
@@ -289,7 +447,7 @@ export function AgentDetail({
 							className="shrink-0 gap-1.5"
 						>
 							<Trash2 className="size-3.5" />
-							Delete
+							<Trans>Delete</Trans>
 						</Button>
 					</div>
 				</div>

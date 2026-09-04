@@ -4,7 +4,6 @@ import { toast } from "@superset/ui/sonner";
 import { Spinner } from "@superset/ui/spinner";
 import {
 	createFileRoute,
-	Navigate,
 	Outlet,
 	useLocation,
 	useNavigate,
@@ -14,10 +13,12 @@ import { DndProvider } from "react-dnd";
 import { HiOutlineWifi } from "react-icons/hi2";
 import { NewWorkspaceModal } from "renderer/components/NewWorkspaceModal";
 import { Paywall } from "renderer/components/Paywall";
+import { Redirect } from "renderer/components/Redirect";
 import { env } from "renderer/env.renderer";
 import { useDelayElapsed } from "renderer/hooks/useDelayElapsed";
 import { useIsV2CloudEnabled } from "renderer/hooks/useIsV2CloudEnabled";
 import { useOnlineStatus } from "renderer/hooks/useOnlineStatus";
+import { useSettingsExternalChangeListener } from "renderer/hooks/useSettingsExternalChangeListener";
 import { useSignOut } from "renderer/hooks/useSignOut";
 import { authClient, getAuthToken } from "renderer/lib/auth-client";
 import { dragDropManager } from "renderer/lib/dnd";
@@ -28,6 +29,10 @@ import { InitGitDialog } from "renderer/react-query/projects/InitGitDialog";
 import { DaemonAutoUpdateFailureDialog } from "renderer/routes/_authenticated/components/DaemonAutoUpdateFailureDialog";
 import { DashboardNewWorkspaceModal } from "renderer/routes/_authenticated/components/DashboardNewWorkspaceModal";
 import { DiffThemeSync } from "renderer/routes/_authenticated/components/DiffThemeSync";
+import { LeaderboardAutoPublish } from "renderer/routes/_authenticated/components/LeaderboardAutoPublish";
+import { LeaderboardFirstRunDialog } from "renderer/routes/_authenticated/components/LeaderboardFirstRunDialog";
+import { PendingDeletionScreen } from "renderer/routes/_authenticated/components/PendingDeletionScreen";
+import { StarNagObserver } from "renderer/routes/_authenticated/components/StarNagObserver";
 import {
 	V1AutoMigration,
 	V1MigrationContinuity,
@@ -47,25 +52,26 @@ import { MOCK_ORG_ID, NOTIFICATION_EVENTS } from "shared/constants";
 import { AgentHooks } from "./components/AgentHooks";
 import { DockBadgeController } from "./components/DockBadgeController";
 import { FileMenuListener } from "./components/FileMenuListener";
+import { GitInitConfirmDialog } from "./components/GitInitConfirmDialog";
 import { GlobalBrowserLifecycle } from "./components/GlobalBrowserLifecycle";
 import { TeardownLogsDialog } from "./components/TeardownLogsDialog";
 import { V2NotificationController } from "./components/V2NotificationController";
+import { WindowTitle } from "./components/WindowTitle";
 import { createPierreWorker } from "./lib/pierreWorker";
 import { CollectionsProvider } from "./providers/CollectionsProvider";
-import { DeletingWorkspacesProvider } from "./providers/DeletingWorkspacesProvider";
 import { HostWorkspacesProvider } from "./providers/HostWorkspacesProvider";
 import { LocalHostServiceProvider } from "./providers/LocalHostServiceProvider";
+import { SandboxAccessProvider } from "./providers/SandboxAccessProvider";
 
 export const Route = createFileRoute("/_authenticated")({
 	component: AuthenticatedLayout,
 });
 
-// Hoisted for stable props identity — <Navigate> re-navigates every re-render otherwise (react error #185 loop, #5729)
-const signInRedirect = <Navigate to="/sign-in" replace />;
+const signInRedirect = <Redirect to="/sign-in" replace />;
 const createOrganizationRedirect = (
-	<Navigate to="/create-organization" replace />
+	<Redirect to="/create-organization" replace />
 );
-const onboardingRedirect = <Navigate to="/onboarding" replace />;
+const onboardingRedirect = <Redirect to="/onboarding" replace />;
 
 const SESSION_PENDING_TIMEOUT_MS = 15_000;
 
@@ -101,6 +107,7 @@ function AuthenticatedLayout() {
 	const [isSigningOut, setIsSigningOut] = useState(false);
 
 	useAgentHookListener();
+	useSettingsExternalChangeListener();
 
 	// Seed the parked-terminal eviction cap from settings (SUPER-1545).
 	const { data: parkedRuntimeCap } =
@@ -131,16 +138,10 @@ function AuthenticatedLayout() {
 				void navigate({
 					to: "/v2-workspace/$workspaceId",
 					params: { workspaceId: event.data.workspaceId },
-					search:
-						source.type === "terminal"
-							? {
-									terminalId: source.id,
-									focusRequestId: crypto.randomUUID(),
-								}
-							: {
-									chatSessionId: source.id,
-									focusRequestId: crypto.randomUUID(),
-								},
+					search: {
+						terminalId: source.id,
+						focusRequestId: crypto.randomUUID(),
+					},
 				});
 				return;
 			}
@@ -273,6 +274,15 @@ function AuthenticatedLayout() {
 		return signInRedirect;
 	}
 
+	if (session?.user?.deletionRequestedAt) {
+		return (
+			<PendingDeletionScreen
+				deletionRequestedAt={session.user.deletionRequestedAt}
+				onReactivated={() => void refetch()}
+			/>
+		);
+	}
+
 	if (!activeOrganizationId) {
 		return createOrganizationRedirect;
 	}
@@ -288,10 +298,13 @@ function AuthenticatedLayout() {
 	return (
 		<DndProvider manager={dragDropManager}>
 			<CollectionsProvider>
+				<WindowTitle />
 				<GlobalBrowserLifecycle />
 				<LocalHostServiceProvider>
-					<HostWorkspacesProvider>
-						<DeletingWorkspacesProvider>
+					{/* Above the workspace fan-out: it needs sandbox addresses to
+					    include them as hosts. */}
+					<SandboxAccessProvider>
+						<HostWorkspacesProvider>
 							<WorkerPoolContextProvider
 								poolOptions={{ workerFactory: createPierreWorker, poolSize: 8 }}
 								highlighterOptions={{ preferredHighlighter: "shiki-wasm" }}
@@ -301,6 +314,9 @@ function AuthenticatedLayout() {
 								<FileMenuListener />
 								<V2NotificationController />
 								<DockBadgeController />
+								<StarNagObserver />
+								<LeaderboardAutoPublish />
+								<LeaderboardFirstRunDialog />
 								<DaemonAutoUpdateFailureDialog />
 								<Outlet />
 								<V1ImportModal />
@@ -320,11 +336,12 @@ function AuthenticatedLayout() {
 									<NewWorkspaceModal />
 								)}
 								<InitGitDialog />
+								<GitInitConfirmDialog />
 								<TeardownLogsDialog />
 								<Paywall />
 							</WorkerPoolContextProvider>
-						</DeletingWorkspacesProvider>
-					</HostWorkspacesProvider>
+						</HostWorkspacesProvider>
+					</SandboxAccessProvider>
 				</LocalHostServiceProvider>
 			</CollectionsProvider>
 		</DndProvider>

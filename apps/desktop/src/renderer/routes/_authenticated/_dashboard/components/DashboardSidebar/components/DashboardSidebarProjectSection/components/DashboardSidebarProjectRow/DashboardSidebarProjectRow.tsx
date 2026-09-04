@@ -1,3 +1,4 @@
+import { Trans, useLingui } from "@lingui/react/macro";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import { cn } from "@superset/ui/utils";
 import { type ComponentPropsWithoutRef, forwardRef } from "react";
@@ -9,6 +10,7 @@ interface DashboardSidebarProjectRowProps
 	extends ComponentPropsWithoutRef<"div"> {
 	projectName: string;
 	iconUrl: string | null;
+	projectColor: string | null;
 	isCollapsed: boolean;
 	isRenaming: boolean;
 	renameValue: string;
@@ -28,6 +30,7 @@ export const DashboardSidebarProjectRow = forwardRef<
 		{
 			projectName,
 			iconUrl,
+			projectColor,
 			isCollapsed,
 			isRenaming,
 			renameValue,
@@ -42,6 +45,7 @@ export const DashboardSidebarProjectRow = forwardRef<
 		},
 		ref,
 	) => {
+		const { t } = useLingui();
 		return (
 			// biome-ignore lint/a11y/noStaticElementInteractions: The header acts as a single toggle target in view mode while preserving nested inline controls.
 			<div
@@ -61,17 +65,18 @@ export const DashboardSidebarProjectRow = forwardRef<
 							}
 				}
 				className={cn(
-					"group mx-2 flex min-h-8 items-center rounded-md pl-2 pr-1 py-1 text-[13px] font-medium",
+					"group mx-2 flex h-7 items-center rounded-md pl-2 pr-1 text-[13px] font-medium",
 					"hover:bg-fill-hover transition-colors",
 					className,
 				)}
 				{...props}
 			>
-				<div className="flex min-w-0 flex-1 items-center gap-2 py-0.5">
-					<div className="flex size-5 shrink-0 items-center justify-center">
+				<div className="flex min-w-0 flex-1 items-center gap-2">
+					<div className="flex size-4 shrink-0 items-center justify-center">
 						<ProjectThumbnail
 							projectName={projectName}
 							iconUrl={iconUrl}
+							color={projectColor}
 							className="size-4 group-hover:hidden"
 						/>
 						<HiChevronRight
@@ -106,13 +111,17 @@ export const DashboardSidebarProjectRow = forwardRef<
 									}}
 									onKeyDown={(event) => event.stopPropagation()}
 									onContextMenu={(event) => event.stopPropagation()}
-									aria-label="New workspace"
+									aria-label={t({
+										message: "New workspace",
+									})}
 									className="hidden size-full items-center justify-center rounded transition-colors hover:bg-fill-hover group-hover:flex group-has-[:focus]:flex focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
 								>
 									<HiMiniPlus className="size-4 text-muted-foreground" />
 								</button>
 							</TooltipTrigger>
-							<TooltipContent side="bottom">New workspace</TooltipContent>
+							<TooltipContent side="bottom">
+								<Trans>New workspace</Trans>
+							</TooltipContent>
 						</Tooltip>
 					</div>
 				)}

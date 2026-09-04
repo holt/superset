@@ -35,6 +35,7 @@ export const NOTIFICATION_EVENTS = {
 	FOCUS_V2_NOTIFICATION_SOURCE: "focus-v2-notification-source",
 	TERMINAL_EXIT: "terminal-exit",
 	RENDERER_RECOVERED: "renderer-recovered",
+	SETTINGS_EXTERNAL_CHANGE: "settings-external-change",
 } as const;
 
 // Development/testing mock values (used when SKIP_ENV_VALIDATION is set)
@@ -42,14 +43,23 @@ export const MOCK_ORG_ID = "mock-org-id";
 
 // Terminal defaults
 export const DEFAULT_TERMINAL_SCROLLBACK = 5000;
+
 // Hidden (parked) xterm instances kept fully alive before LRU eviction. (SUPER-1545)
-export const DEFAULT_TERMINAL_PARKED_RUNTIME_CAP = 12;
-export const MIN_TERMINAL_PARKED_RUNTIME_CAP = 2;
-export const MAX_TERMINAL_PARKED_RUNTIME_CAP = 64;
+import {
+	DEFAULT_TERMINAL_PARKED_RUNTIME_CAP as SHARED_DEFAULT_PARKED_CAP,
+	TERMINAL_PARKED_RUNTIME_CAP_LIMITS,
+} from "@superset/shared/settings-constraints";
+
+export const DEFAULT_TERMINAL_PARKED_RUNTIME_CAP = SHARED_DEFAULT_PARKED_CAP;
+export const MIN_TERMINAL_PARKED_RUNTIME_CAP =
+	TERMINAL_PARKED_RUNTIME_CAP_LIMITS.min;
+export const MAX_TERMINAL_PARKED_RUNTIME_CAP =
+	TERMINAL_PARKED_RUNTIME_CAP_LIMITS.max;
 
 // Default user preference values
 export const DEFAULT_CONFIRM_ON_QUIT = true;
 export const DEFAULT_TERMINAL_LINK_BEHAVIOR = "file-viewer" as const;
+export const DEFAULT_TERMINAL_COPY_ON_SELECT = false;
 export const DEFAULT_FILE_OPEN_MODE = "split-pane" as const;
 export const DEFAULT_AUTO_APPLY_DEFAULT_PRESET = true;
 export const DEFAULT_WAIT_FOR_SETUP_BEFORE_AGENT = false;

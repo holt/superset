@@ -1,14 +1,17 @@
+import { useLingui } from "@lingui/react/macro";
 import * as Crypto from "expo-crypto";
 import { Stack, useRouter } from "expo-router";
 import { useState } from "react";
 import { ScrollView, TextInput, View } from "react-native";
 import { Text } from "@/components/ui/text";
+import { posthog } from "@/lib/posthog";
 import { PressableScale } from "@/screens/(authenticated)/components/PressableScale";
 import { useCommentComposerStore } from "../stores/commentComposerStore";
 import { useDraftCommentsStore } from "../stores/draftCommentsStore";
 import { AnchorLineRow } from "./components/AnchorLineRow";
 
 export function LineCommentSheet() {
+	const { t } = useLingui();
 	const router = useRouter();
 	const anchor = useCommentComposerStore((state) => state.anchor);
 	const closeComposer = useCommentComposerStore((state) => state.closeComposer);
@@ -35,6 +38,13 @@ export function LineCommentSheet() {
 				createdAt: Date.now(),
 			});
 		}
+		posthog.capture("line_comment_added", {
+			workspace_id: anchor.workspaceId,
+			is_edit: !!anchor.editingDraftId,
+			line_type: anchor.lineType,
+			side: anchor.side,
+			message_length: trimmed.length,
+		});
 		closeComposer();
 		router.back();
 	};
@@ -45,13 +55,17 @@ export function LineCommentSheet() {
 		<>
 			<Stack.Screen
 				options={{
-					title: anchor?.editingDraftId ? "Edit comment" : "Add comment",
+					title: anchor?.editingDraftId
+						? t({ message: "Edit comment" })
+						: t({ message: "Add comment" }),
 				}}
 			/>
 			<Stack.Toolbar placement="left">
 				<Stack.Toolbar.Button
 					icon="xmark"
-					accessibilityLabel="Close"
+					accessibilityLabel={t({
+						message: "Close",
+					})}
 					onPress={() => {
 						closeComposer();
 						router.back();
@@ -83,7 +97,9 @@ export function LineCommentSheet() {
 					className="border-border text-foreground mx-3 min-h-32 rounded-xl border px-3.5 py-3 text-[15px]"
 					multiline
 					onChangeText={setBody}
-					placeholder="Leave a comment…"
+					placeholder={t({
+						message: "Leave a comment…",
+					})}
 					placeholderTextColor="#6b7280"
 					value={body}
 				/>
@@ -97,7 +113,9 @@ export function LineCommentSheet() {
 					onPress={submit}
 				>
 					<Text className="text-primary-foreground font-semibold text-[15px]">
-						{anchor?.editingDraftId ? "Save" : "Comment"}
+						{anchor?.editingDraftId
+							? t({ message: "Save" })
+							: t({ message: "Comment" })}
 					</Text>
 				</PressableScale>
 			</ScrollView>

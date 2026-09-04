@@ -5,10 +5,12 @@
 
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
-import type {
-	SerializedWorkerError,
-	WorkerTaskRequestMessage,
-	WorkerTaskResponseMessage,
+import {
+	isWorkerTaskPhaseMessage,
+	type SerializedWorkerError,
+	type WorkerShutdownRequestMessage,
+	type WorkerTaskRequestMessage,
+	type WorkerTaskResponseMessage,
 } from "./worker-task-protocol.ts";
 
 export class WorkerTaskError extends Error {
@@ -52,6 +54,9 @@ interface WorkerTaskRunnerOptions {
 	idleTimeoutMs?: number;
 	/** Extra execArgv for spawned workers (tests pass strip-types flags). */
 	execArgv?: string[];
+	/** How long a worker gets to honor a cooperative shutdown (kill + reap
+	 * its child processes) before it is hard-terminated. */
+	shutdownGraceMs?: number;
 }
 
 interface WorkerSlot {
@@ -60,6 +65,7 @@ interface WorkerSlot {
 	activeTaskId: string | null;
 	terminating: boolean;
 	idleTimer?: NodeJS.Timeout;
+	graceTimer?: NodeJS.Timeout;
 }
 
 interface QueuedTask {
@@ -76,9 +82,13 @@ interface QueuedTask {
 	timeoutMs: number;
 	timeoutHandle?: NodeJS.Timeout;
 	slotId?: number;
+	/** Last phase the handler reported, if it reports any. */
+	phase?: string;
 }
 
 export const DEFAULT_TIMEOUT_MS = 60_000;
+
+export const DEFAULT_SHUTDOWN_GRACE_MS = 5_000;
 
 export class WorkerTaskRunner {
 	private readonly workerScriptPath: string;
@@ -87,6 +97,7 @@ export class WorkerTaskRunner {
 	private readonly debug: boolean;
 	private readonly idleTimeoutMs?: number;
 	private readonly execArgv?: string[];
+	private readonly shutdownGraceMs: number;
 	private readonly workerSlots = new Map<number, WorkerSlot>();
 	private readonly queue: string[] = [];
 	private readonly tasks = new Map<string, QueuedTask>();
@@ -102,6 +113,7 @@ export class WorkerTaskRunner {
 		this.debug = options.debug ?? false;
 		this.idleTimeoutMs = options.idleTimeoutMs;
 		this.execArgv = options.execArgv;
+		this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
 	}
 
 	/** Live (non-terminating) worker count — exposed for idle-reap tests. */
@@ -210,17 +222,24 @@ export class WorkerTaskRunner {
 		}
 		this.queue.length = 0;
 
+		const exits: Promise<void>[] = [];
 		for (const slot of this.workerSlots.values()) {
-			slot.terminating = true;
-			this.clearIdleTimer(slot);
 			if (slot.activeTaskId) {
 				this.rejectTask(
 					slot.activeTaskId,
 					new WorkerTaskAbortedError("Worker runner disposed"),
 				);
 			}
-			await slot.worker.terminate();
+			exits.push(
+				new Promise<void>((resolve) => {
+					slot.worker.once("exit", () => resolve());
+				}),
+			);
+			// Slots already terminating keep their in-flight shutdown; their
+			// grace timer still guarantees the exit awaited below.
+			this.shutdownSlot(slot);
 		}
+		await Promise.all(exits);
 
 		this.workerSlots.clear();
 	}
@@ -333,9 +352,9 @@ export class WorkerTaskRunner {
 				slot.idleTimer = undefined;
 				if (slot.activeTaskId || slot.terminating || this.disposed) return;
 				this.log(`reaping idle worker ${slot.id}`);
-				slot.terminating = true;
-				this.workerSlots.delete(slot.id);
-				void slot.worker.terminate();
+				// The slot stays mapped (as terminating) until the worker exits;
+				// handleWorkerFailure removes it then.
+				this.shutdownSlot(slot);
 			}, this.idleTimeoutMs);
 			slot.idleTimer.unref?.();
 		}
@@ -348,9 +367,50 @@ export class WorkerTaskRunner {
 		}
 	}
 
+	/** Retire a worker without stranding its children: ask it to SIGKILL +
+	 * reap in-flight child processes and exit on its own; hard-terminate only
+	 * if it doesn't within the grace period. terminate() destroys the thread's
+	 * libuv process handles, so any child it hadn't reaped would stay
+	 * <defunct> under host-service until the process dies (#6152). */
+	private shutdownSlot(slot: WorkerSlot): void {
+		if (slot.terminating) return;
+		slot.terminating = true;
+		this.clearIdleTimer(slot);
+
+		slot.worker.once("exit", () => this.clearGraceTimer(slot));
+		slot.graceTimer = setTimeout(() => {
+			slot.graceTimer = undefined;
+			this.log(`worker ${slot.id} ignored shutdown request; terminating`);
+			void slot.worker.terminate();
+		}, this.shutdownGraceMs);
+		slot.graceTimer.unref?.();
+
+		const request: WorkerShutdownRequestMessage = { kind: "shutdown" };
+		try {
+			slot.worker.postMessage(request);
+		} catch {
+			this.clearGraceTimer(slot);
+			void slot.worker.terminate();
+		}
+	}
+
+	private clearGraceTimer(slot: WorkerSlot): void {
+		if (slot.graceTimer) {
+			clearTimeout(slot.graceTimer);
+			slot.graceTimer = undefined;
+		}
+	}
+
 	private handleWorkerMessage(slotId: number, message: unknown): void {
 		const slot = this.workerSlots.get(slotId);
 		if (!slot) return;
+
+		if (isWorkerTaskPhaseMessage(message)) {
+			if (slot.activeTaskId !== message.taskId) return;
+			const active = this.tasks.get(message.taskId);
+			if (active) active.phase = message.phase;
+			return;
+		}
 
 		if (!this.isWorkerResultMessage(message)) {
 			return;
@@ -369,10 +429,7 @@ export class WorkerTaskRunner {
 			this.log(
 				`worker ${slot.id} reported result for missing active task ${response.taskId}; recycling worker`,
 			);
-			if (!slot.terminating) {
-				slot.terminating = true;
-				void slot.worker.terminate();
-			}
+			this.shutdownSlot(slot);
 			return;
 		}
 
@@ -429,18 +486,21 @@ export class WorkerTaskRunner {
 		const task = this.tasks.get(taskId);
 		if (!task) return;
 
+		// Name the phase when the handler reported one: the timer knows only
+		// that the budget expired, and the worker is retired right below, so
+		// this is the sole record of what was still running.
+		const phaseSuffix = task.phase ? ` in phase "${task.phase}"` : "";
 		this.rejectTask(
 			taskId,
 			new WorkerTaskError(
-				`[${this.name}] Task "${task.taskType}" timed out after ${task.timeoutMs}ms`,
+				`[${this.name}] Task "${task.taskType}" timed out after ${task.timeoutMs}ms${phaseSuffix}`,
 			),
 		);
 
 		if (task.slotId) {
 			const slot = this.workerSlots.get(task.slotId);
 			if (slot && !slot.terminating) {
-				slot.terminating = true;
-				void slot.worker.terminate();
+				this.shutdownSlot(slot);
 				if (this.hasOutstandingWork()) {
 					this.ensureWorkerCapacity();
 					this.drainQueue();
@@ -458,8 +518,7 @@ export class WorkerTaskRunner {
 		if (task.slotId) {
 			const slot = this.workerSlots.get(task.slotId);
 			if (slot && !slot.terminating) {
-				slot.terminating = true;
-				void slot.worker.terminate();
+				this.shutdownSlot(slot);
 				if (this.hasOutstandingWork()) {
 					this.ensureWorkerCapacity();
 					this.drainQueue();

@@ -1,3 +1,5 @@
+import { initI18n } from "@superset/i18n";
+import { I18nProvider } from "@superset/i18n/react";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import type { Metadata } from "next";
 import "./global.css";
@@ -10,13 +12,18 @@ const inter = Inter({
 	subsets: ["latin"],
 });
 
+// Server components render outside I18nProvider (which is client-only), and
+// `i18n._` throws on an unactivated instance. Activating at module scope means
+// the server module graph is ready before any RSC in this tree renders.
+initI18n();
+
 export const metadata: Metadata = {
 	metadataBase: new URL(COMPANY.DOCS_URL),
 	title: {
 		default: `${COMPANY.NAME} Documentation`,
 		template: `%s | ${COMPANY.NAME} Docs`,
 	},
-	description: `Official documentation for ${COMPANY.NAME} - the terminal for coding agents. Learn how to run parallel coding agents on your machine.`,
+	description: `Official documentation for ${COMPANY.NAME}. Learn how to run 100+ coding agents in parallel on your machine.`,
 	keywords: [
 		`${COMPANY.NAME} documentation`,
 		"coding agents docs",
@@ -31,12 +38,12 @@ export const metadata: Metadata = {
 		url: COMPANY.DOCS_URL,
 		siteName: `${COMPANY.NAME} Docs`,
 		title: `${COMPANY.NAME} Documentation`,
-		description: `Official documentation for ${COMPANY.NAME} - the terminal for coding agents.`,
+		description: `Official documentation for ${COMPANY.NAME}, the app for running 100+ coding agents in parallel.`,
 	},
 	twitter: {
 		card: "summary_large_image",
 		title: `${COMPANY.NAME} Documentation`,
-		description: `Official documentation for ${COMPANY.NAME} - the terminal for coding agents.`,
+		description: `Official documentation for ${COMPANY.NAME}, the app for running 100+ coding agents in parallel.`,
 		creator: "@superset_sh",
 	},
 	robots: {
@@ -67,12 +74,14 @@ export default function Layout({ children }: LayoutProps<"/">) {
 			suppressHydrationWarning
 		>
 			<body className="flex flex-col min-h-screen overscroll-none">
-				<RootProvider>
-					<NavbarProvider>
-						<NavigationBar />
-						{children}
-					</NavbarProvider>
-				</RootProvider>
+				<I18nProvider>
+					<RootProvider>
+						<NavbarProvider>
+							<NavigationBar />
+							{children}
+						</NavbarProvider>
+					</RootProvider>
+				</I18nProvider>
 			</body>
 		</html>
 	);

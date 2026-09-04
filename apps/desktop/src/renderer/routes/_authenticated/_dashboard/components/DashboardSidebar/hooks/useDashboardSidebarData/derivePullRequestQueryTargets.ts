@@ -58,7 +58,7 @@ export function derivePullRequestQueryTargets({
 		workspaceIds.sort();
 	}
 
-	const targets = hosts.flatMap((host) => {
+	const targets: PullRequestQueryTarget[] = hosts.flatMap((host) => {
 		const workspaceIds = workspaceIdsByHostId.get(host.machineId);
 		if (!workspaceIds || workspaceIds.length === 0) return [];
 
