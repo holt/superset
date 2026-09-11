@@ -104,6 +104,18 @@ export function CollectionsProvider({ children }: { children: ReactNode }) {
 	const initializedRef = useRef(false);
 	useEffect(() => {
 		if (initializedRef.current) return;
+		// Fork-local: in SKIP_ENV_VALIDATION mock mode there is no real session,
+		// so cloud `organization.list` 401s and `organizations` never resolves.
+		// The gate below (`windowOrgId != null && organizations == null`) then
+		// blocks forever once a prior run has persisted mock-org-id into the
+		// window registry — leaving CollectionsProvider's contextValue null,
+		// which returns null and unmounts the whole authenticated tree (blank
+		// app). Mock mode has exactly one org (MOCK_ORG_ID); resolve it directly.
+		if (env.SKIP_ENV_VALIDATION) {
+			initializedRef.current = true;
+			setActiveOrganizationId(sessionOrgId ?? null);
+			return;
+		}
 		if (windowOrgPending) return;
 		// The registry's org is only preferred while it is still one the user
 		// belongs to. Leaving an organization (or having membership revoked
