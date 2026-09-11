@@ -19,6 +19,18 @@ export const serverErrorMessages: Record<
 				message: "Active organization required to create an API key",
 			}),
 		),
+	"serverError.attachment.notFound": () =>
+		i18n._(
+			msg({
+				message: "Attachment not found",
+			}),
+		),
+	"serverError.attachment.notUploaded": () =>
+		i18n._(
+			msg({
+				message: "Attachment was not uploaded — send the bytes first",
+			}),
+		),
 	"serverError.automation.aRunForThisAutomation": () =>
 		i18n._(
 			msg({
@@ -29,6 +41,12 @@ export const serverErrorMessages: Record<
 		i18n._(
 			msg({
 				message: "Automation has no instructions",
+			}),
+		),
+	"serverError.automation.automationInAnotherOrganization": (params) =>
+		i18n._(
+			msg({
+				message: `This automation belongs to ${params?.organizationName}. Switch to that organization to open it.`,
 			}),
 		),
 	"serverError.automation.automationNotFound": () =>
@@ -127,12 +145,13 @@ export const serverErrorMessages: Record<
 				message: "No active organization selected",
 			}),
 		),
-	"serverError.cloudWorkspace.cloudWorkspacesAreNotAvailableYet": () =>
-		i18n._(
-			msg({
-				message: "Cloud workspaces are not available yet",
-			}),
-		),
+	"serverError.cloudWorkspace.cloudSandboxesAreInternalOnly": (params) =>
+		i18n._({
+			id: "serverError.cloudWorkspace.cloudSandboxesAreInternalOnly",
+			message:
+				"Cloud sandboxes are not enabled for {account}. Ask the Superset team for access.",
+			values: params,
+		}),
 	"serverError.cloudWorkspace.couldNotRecordCloudWorkspace": () =>
 		i18n._(
 			msg({
@@ -472,6 +491,85 @@ export const serverErrorMessages: Record<
 				message: "Thread not found",
 			}),
 		),
+	"serverError.plugins.ambiguousPlugin": (params) =>
+		i18n._({
+			id: "serverError.plugins.ambiguousPlugin",
+			message: "{reason}",
+			values: params,
+		}),
+	"serverError.plugins.connectionNotFound": () =>
+		i18n._({
+			id: "serverError.plugins.connectionNotFound",
+			message: "Connection not found",
+		}),
+	"serverError.plugins.credentialUnverified": (params) =>
+		i18n._({
+			id: "serverError.plugins.credentialUnverified",
+			message: "Could not verify the credential: {reason}",
+			values: params,
+		}),
+	"serverError.plugins.dispatchFailed": (params) =>
+		i18n._({
+			id: "serverError.plugins.dispatchFailed",
+			message: "{reason}",
+			values: params,
+		}),
+	"serverError.plugins.marketplaceBuiltinRemove": (params) =>
+		i18n._({
+			id: "serverError.plugins.marketplaceBuiltinRemove",
+			message: "{name} is built in and cannot be removed",
+			values: params,
+		}),
+	"serverError.plugins.marketplaceHasInstalls": (params) =>
+		i18n._({
+			id: "serverError.plugins.marketplaceHasInstalls",
+			message:
+				"Installed plugins came from {name}: {plugins}. Remove them first.",
+			values: params,
+		}),
+	"serverError.plugins.marketplaceNotAdded": (params) =>
+		i18n._({
+			id: "serverError.plugins.marketplaceNotAdded",
+			message: "{name} is not added",
+			values: params,
+		}),
+	"serverError.plugins.marketplaceNotResolvable": (params) =>
+		i18n._({
+			id: "serverError.plugins.marketplaceNotResolvable",
+			message:
+				"Account install resolves first-party manifests only, so {plugin} from {marketplace} cannot be installed to your account yet. It stays installed on this machine.",
+			values: params,
+		}),
+	"serverError.plugins.marketplaceReserved": (params) =>
+		i18n._({
+			id: "serverError.plugins.marketplaceReserved",
+			message: "{name} is built in and cannot be replaced",
+			values: params,
+		}),
+	"serverError.plugins.missingInput": (params) =>
+		i18n._({
+			id: "serverError.plugins.missingInput",
+			message: "Missing required input {input}",
+			values: params,
+		}),
+	"serverError.plugins.noApiKeyAuth": (params) =>
+		i18n._({
+			id: "serverError.plugins.noApiKeyAuth",
+			message: "Plugin {plugin} does not use api_key auth",
+			values: params,
+		}),
+	"serverError.plugins.notInstalled": (params) =>
+		i18n._({
+			id: "serverError.plugins.notInstalled",
+			message: "Plugin {plugin} is not installed",
+			values: params,
+		}),
+	"serverError.plugins.unknownPlugin": (params) =>
+		i18n._({
+			id: "serverError.plugins.unknownPlugin",
+			message: "Unknown plugin {plugin}",
+			values: params,
+		}),
 	"serverError.support.failedToSavePrompt": () =>
 		i18n._(
 			msg({
@@ -542,12 +640,6 @@ export const serverErrorMessages: Record<
 		i18n._(
 			msg({
 				message: "Invalid image type. Only PNG, JPEG, and WebP are allowed",
-			}),
-		),
-	"serverError.uploadBytes.fileIsEmpty": () =>
-		i18n._(
-			msg({
-				message: "File is empty",
 			}),
 		),
 	"serverError.user.failedToUploadAvatar": () =>
