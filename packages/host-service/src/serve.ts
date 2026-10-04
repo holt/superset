@@ -6,15 +6,17 @@ import { installConsoleTimestamps } from "./log-timestamps";
 import {
 	ConfigFileSessionTokenSource,
 	JwtApiAuthProvider,
+	SandboxApiAuthProvider,
 } from "./providers/auth";
 import { LocalGitCredentialProvider } from "./providers/git";
-import {
-	EdgeGuardedHostAuthProvider,
-	PskHostAuthProvider,
-} from "./providers/host-auth";
+import { PskHostAuthProvider } from "./providers/host-auth";
 import { provisionAgentIntegrations } from "./runtime/agent-provisioning";
+import { processStartedAt, recordBootStamp } from "./runtime/boot-stamps";
 import { resolveBrowserBridgeFromEnv } from "./runtime/browser-bridge/env";
 import { applyLoginShellEnvToProcess } from "./runtime/login-shell-env";
+import { startSandboxAgentStatusReporter } from "./runtime/sandbox-agent-status";
+import { startSandboxCredentialRefresh } from "./runtime/sandbox-credential-refresh";
+import { startVitalsLog } from "./runtime/vitals";
 import { detachFromLaunchDirectory } from "./runtime/working-directory";
 import { installProcessSafetyNet, installUpgradeSocketGuard } from "./safety";
 import { configureSelfUpdater } from "./self-update";
@@ -25,6 +27,7 @@ import { connectRelay, type TunnelClient } from "./tunnel";
 
 async function main(): Promise<void> {
 	installConsoleTimestamps();
+	recordBootStamp("host.process.start", processStartedAt());
 	initSentry({ organizationId: env.ORGANIZATION_ID });
 
 	// Before anything spawns a worker thread or a child process: a host
@@ -75,22 +78,34 @@ async function main(): Promise<void> {
 			: undefined,
 		apiUrl: env.SUPERSET_API_URL,
 	});
+	const apiAuthProvider =
+		env.SUPERSET_HOST_RUN_MODE === "sandbox"
+			? new SandboxApiAuthProvider()
+			: authProvider;
 
-	const { app, injectWebSocket, api, db, launchSandboxAgent } = createApp({
+	const {
+		app,
+		injectWebSocket,
+		api,
+		db,
+		launchSandboxAgent,
+		resumeCrashedAgents,
+		terminalAgentStore,
+	} = createApp({
 		config: {
 			organizationId: env.ORGANIZATION_ID,
 			dbPath: env.HOST_DB_PATH,
 			cloudApiUrl: env.SUPERSET_API_URL,
 			migrationsFolder: env.HOST_MIGRATIONS_FOLDER,
-			allowedOrigins: env.CORS_ORIGINS ?? [],
+			allowedOrigins:
+				env.SUPERSET_HOST_RUN_MODE === "sandbox"
+					? "*"
+					: (env.CORS_ORIGINS ?? []),
 			browserBridge: resolveBrowserBridgeFromEnv(env),
 		},
 		providers: {
-			auth: authProvider,
-			hostAuth:
-				env.SUPERSET_HOST_RUN_MODE === "sandbox"
-					? new EdgeGuardedHostAuthProvider()
-					: new PskHostAuthProvider(env.HOST_SERVICE_SECRET),
+			auth: apiAuthProvider,
+			hostAuth: new PskHostAuthProvider(env.HOST_SERVICE_SECRET),
 			credentials: new LocalGitCredentialProvider(),
 		},
 	});
@@ -136,12 +151,31 @@ async function main(): Promise<void> {
 			? `[${info.address}]`
 			: info.address;
 		console.log(`[host-service] listening on http://${address}:${info.port}`);
+		recordBootStamp("host.listening");
 
 		startTerminalReaper(db);
+		startVitalsLog();
 		// A cloud workspace created with an agent starts it now: the pty daemon
 		// and event bus are up, and a person opening the workspace sees the
 		// agent's terminal the way they would on their own machine.
 		void launchSandboxAgent();
+		// A stop keeps the disk and drops every process, so nothing else on the
+		// box will notice that its agents are gone.
+		if (env.SUPERSET_HOST_RUN_MODE === "sandbox") void resumeCrashedAgents();
+		const sandboxWorkspaceId = process.env.SUPERSET_SANDBOX_WORKSPACE_ID;
+		if (env.SUPERSET_HOST_RUN_MODE === "sandbox" && sandboxWorkspaceId) {
+			startSandboxCredentialRefresh({
+				apiUrl: env.SUPERSET_API_URL,
+				workspaceId: sandboxWorkspaceId,
+				hostSecret: env.HOST_SERVICE_SECRET,
+			});
+			startSandboxAgentStatusReporter({
+				apiUrl: env.SUPERSET_API_URL,
+				workspaceId: sandboxWorkspaceId,
+				hostSecret: env.HOST_SERVICE_SECRET,
+				store: terminalAgentStore,
+			});
+		}
 
 		if (env.RELAY_URL && env.SUPERSET_HOST_RUN_MODE !== "sandbox") {
 			tunnelPromise = connectRelay({
@@ -161,7 +195,7 @@ async function main(): Promise<void> {
 	// Standalone only: this process owns its listener and relay socket, so it
 	// can hand the port to a successor build (system.update). The desktop
 	// entry never registers this and its host-service stays non-updatable.
-	configureSelfUpdater({
+	const selfUpdater = configureSelfUpdater({
 		stopServing: async () => {
 			// Cancel registration retries before replacing this process.
 			relayAbort.abort();
@@ -181,6 +215,13 @@ async function main(): Promise<void> {
 			]);
 		},
 	});
+	if (env.SUPERSET_HOST_AUTO_UPDATE && selfUpdater.status().updatable) {
+		const timer = setInterval(
+			() => void selfUpdater.checkForUpdates(),
+			60 * 60_000,
+		);
+		timer.unref();
+	}
 }
 
 void main().catch(async (error) => {

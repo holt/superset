@@ -1,9 +1,10 @@
 import { Trans, useLingui } from "@lingui/react/macro";
-import { useRouter } from "expo-router";
+import { useFormat } from "@superset/i18n/react";
 import {
 	AlertCircle,
+	Archive,
+	ArchiveRestore,
 	Check,
-	Cloud,
 	GitBranch,
 	type LucideIcon,
 } from "lucide-react-native";
@@ -15,6 +16,7 @@ import { Text } from "@/components/ui/text";
 import { useCloudWorkspaceActions } from "@/hooks/useCloudWorkspaceActions";
 import type { CloudWorkspaceRow } from "@/hooks/useCloudWorkspaces";
 import { cn } from "@/lib/utils";
+import { CloudIcon } from "@/screens/(authenticated)/components/CloudIcon";
 
 /**
  * A warm sandbox is up in a second or two; the first ones after an image
@@ -34,14 +36,30 @@ const STUCK_AFTER_SECONDS = 45;
  */
 export function CloudWorkspaceProvisioningState({
 	cloud,
+	unreachable,
+	onRetry,
 }: {
 	cloud: CloudWorkspaceRow;
+	/** The sandbox couldn't be woken or didn't answer; attempts continue. */
+	unreachable: boolean;
+	onRetry: () => void;
 }) {
 	const { t } = useLingui();
 	const elapsed = useElapsedSeconds();
 
+	if (cloud.status === "deleted") {
+		return <CloudWorkspaceArchivedState cloud={cloud} />;
+	}
 	if (cloud.status === "failed") {
 		return <CloudWorkspaceFailedState cloud={cloud} />;
+	}
+	// A booting sandbox fails its first requests too; only a stuck one is unreachable.
+	if (
+		cloud.status === "ready" &&
+		unreachable &&
+		elapsed >= STUCK_AFTER_SECONDS
+	) {
+		return <CloudWorkspaceUnreachableState cloud={cloud} onRetry={onRetry} />;
 	}
 
 	// `ready` means the provider handed back a preview URL, which is a step
@@ -51,7 +69,7 @@ export function CloudWorkspaceProvisioningState({
 	const sandboxReady = cloud.status !== "provisioning";
 
 	return (
-		<Frame icon={Cloud} iconClassName="text-muted-foreground">
+		<Frame icon={CloudIcon} iconClassName="text-muted-foreground">
 			<Heading
 				title={t({
 					message: "Starting workspace",
@@ -87,27 +105,46 @@ export function CloudWorkspaceProvisioningState({
 	);
 }
 
+function CloudWorkspaceArchivedState({ cloud }: { cloud: CloudWorkspaceRow }) {
+	const { t } = useLingui();
+	const { formatCompactRelativeTime } = useFormat();
+	const { unarchive } = useCloudWorkspaceActions();
+
+	return (
+		<Frame icon={Archive} iconClassName="text-muted-foreground">
+			<Heading
+				title={cloud.name || t({ message: "Untitled workspace" })}
+				name={
+					cloud.deletedAt
+						? t({
+								message: `Archived · ${formatCompactRelativeTime(cloud.deletedAt)}`,
+							})
+						: t({ message: "Archived" })
+				}
+			/>
+			<Button
+				onPress={() =>
+					void unarchive(cloud.id).catch(() =>
+						Alert.alert(t({ message: "Unarchive failed" })),
+					)
+				}
+			>
+				<Icon as={ArchiveRestore} className="text-primary-foreground size-4" />
+				<Text>
+					<Trans>Unarchive</Trans>
+				</Text>
+			</Button>
+		</Frame>
+	);
+}
+
 /**
  * Provisioning gave up. The row is all that is left of the workspace — the
  * sandbox behind it was torn down when it failed — so the only thing to offer
- * is disposing of it, which is also the only way to clear it from the list.
+ * is archiving it, which is also the only way to clear it from the list.
  */
 function CloudWorkspaceFailedState({ cloud }: { cloud: CloudWorkspaceRow }) {
 	const { t } = useLingui();
-	const router = useRouter();
-	const { remove: removeCloudWorkspace } = useCloudWorkspaceActions();
-	const [isDeleting, setIsDeleting] = useState(false);
-
-	const remove = async () => {
-		setIsDeleting(true);
-		try {
-			await removeCloudWorkspace(cloud.id);
-			router.back();
-		} catch {
-			Alert.alert(t({ message: "Delete failed" }));
-			setIsDeleting(false);
-		}
-	};
 
 	return (
 		<Frame icon={AlertCircle} iconClassName="text-destructive">
@@ -119,18 +156,67 @@ function CloudWorkspaceFailedState({ cloud }: { cloud: CloudWorkspaceRow }) {
 			/>
 			<BranchLine branch={cloud.branch} />
 			<Text className="text-muted-foreground max-w-[300px] text-center text-[13px] leading-relaxed">
-				<Trans>Nothing is running. Remove it and create a new one.</Trans>
+				<Trans>Nothing is running. Archive it and create a new one.</Trans>
 			</Text>
-			<Button variant="secondary" disabled={isDeleting} onPress={remove}>
-				<Text>
-					{isDeleting
-						? t({ message: "Removing…" })
-						: t({
-								message: "Remove workspace",
-							})}
-				</Text>
-			</Button>
+			<ArchiveWorkspaceButton workspaceId={cloud.id} />
 		</Frame>
+	);
+}
+
+/**
+ * The row says ready but its sandbox won't wake or answer. Attempts keep
+ * going behind this; one that never recovers is only cleared by removing it.
+ */
+function CloudWorkspaceUnreachableState({
+	cloud,
+	onRetry,
+}: {
+	cloud: CloudWorkspaceRow;
+	onRetry: () => void;
+}) {
+	const { t } = useLingui();
+
+	return (
+		<Frame icon={AlertCircle} iconClassName="text-destructive">
+			<Heading
+				title={t({ message: "Couldn't reach workspace" })}
+				name={cloud.name}
+			/>
+			<BranchLine branch={cloud.branch} />
+			<Text className="text-muted-foreground max-w-[300px] text-center text-[13px] leading-relaxed">
+				<Trans>
+					Still trying. If it keeps failing, archive it and create a new one.
+				</Trans>
+			</Text>
+			<View className="flex-row gap-2">
+				<Button variant="secondary" onPress={onRetry}>
+					<Text>
+						<Trans>Try again</Trans>
+					</Text>
+				</Button>
+				<ArchiveWorkspaceButton workspaceId={cloud.id} />
+			</View>
+		</Frame>
+	);
+}
+
+function ArchiveWorkspaceButton({ workspaceId }: { workspaceId: string }) {
+	const { t } = useLingui();
+	const { archive } = useCloudWorkspaceActions();
+
+	return (
+		<Button
+			variant="secondary"
+			onPress={() =>
+				void archive(workspaceId).catch(() =>
+					Alert.alert(t({ message: "Archive failed" })),
+				)
+			}
+		>
+			<Text>
+				<Trans>Archive workspace</Trans>
+			</Text>
+		</Button>
 	);
 }
 
@@ -145,7 +231,7 @@ function Frame({
 }) {
 	return (
 		<View className="flex-1 items-center justify-center px-8">
-			<View className="w-full items-center gap-5">
+			<View className="w-full max-w-md items-center gap-5">
 				<Icon
 					as={icon}
 					className={cn("size-12", iconClassName)}

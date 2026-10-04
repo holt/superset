@@ -1,3 +1,5 @@
+import { Trans, useLingui } from "@lingui/react/macro";
+import { Button } from "@superset/ui/button";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useDrop } from "react-dnd";
 import type { StoreApi } from "zustand/vanilla";
@@ -10,6 +12,7 @@ import type {
 import type {
 	ContextMenuActionConfig,
 	PaneActionConfig,
+	PaneErrorHandler,
 	PaneRegistry,
 	RendererContext,
 } from "../../../../../../types";
@@ -19,6 +22,8 @@ import { PANE_MIN_SIZE_CLASS_NAME } from "../../constants";
 import { DropZoneOverlay } from "./components/DropZoneOverlay";
 import { PaneContent } from "./components/PaneContent";
 import { PaneContextMenu } from "./components/PaneContextMenu";
+import { PaneErrorBoundary } from "./components/PaneErrorBoundary";
+import { PaneFallback } from "./components/PaneFallback";
 import { PANE_DRAG_TYPE, PaneHeader } from "./components/PaneHeader";
 
 type PaneDropItem = { paneId: string } | { tabId: string; index: number };
@@ -37,6 +42,7 @@ interface PaneComponentProps<TData> {
 	contextMenuActions?:
 		| ContextMenuActionConfig<TData>[]
 		| ((context: RendererContext<TData>) => ContextMenuActionConfig<TData>[]);
+	onPaneError?: PaneErrorHandler;
 }
 
 function resolveActions<TData, TAction>(
@@ -76,7 +82,9 @@ export function Pane<TData>({
 	parentDirection = null,
 	paneActions,
 	contextMenuActions,
+	onPaneError,
 }: PaneComponentProps<TData>) {
+	const { t } = useLingui();
 	const definition = registry[pane.kind];
 
 	const tabs = store.getState().tabs;
@@ -119,7 +127,7 @@ export function Pane<TData>({
 						newPane,
 					}),
 			},
-			components: { PaneHeaderActions: () => null },
+			headerActions: null,
 		};
 
 		// Resolve workspace-level actions (or empty if not provided)
@@ -135,7 +143,7 @@ export function Pane<TData>({
 			workspaceResolved,
 		);
 
-		ctx.components.PaneHeaderActions = () => (
+		ctx.headerActions = (
 			<PaneHeaderActions actions={finalActions} context={ctx} />
 		);
 
@@ -233,7 +241,8 @@ export function Pane<TData>({
 
 	const title = definition
 		? (pane.titleOverride ?? definition.getTitle?.(pane) ?? pane.id)
-		: `Unknown: ${pane.kind}`;
+		: t({ message: "Unknown pane" });
+	const paneKind = pane.kind;
 	const icon = definition?.getIcon?.(context);
 	const titleContent = definition?.renderTitle?.(context);
 	const headerExtras = definition?.renderHeaderExtras?.(context);
@@ -243,15 +252,18 @@ export function Pane<TData>({
 
 	return (
 		<PaneContextMenu actions={resolvedContextMenuActions} context={context}>
-			{/* biome-ignore lint/a11y/noStaticElementInteractions: clicking anywhere in a pane focuses it (standard IDE behavior) */}
 			<div
 				ref={setRefs}
-				className={`relative flex h-full w-full ${PANE_MIN_SIZE_CLASS_NAME} flex-col overflow-hidden border-2 transition-colors duration-150 ${
+				// @container/pane-header: header pieces collapse by the pane's own
+				// width (panes resize independently of the viewport). Lives here,
+				// not on the header, so the containment's stacking context still
+				// holds both the header's absolute popovers and the pane's banners.
+				className={`@container/pane-header relative flex h-full w-full ${PANE_MIN_SIZE_CLASS_NAME} flex-col overflow-hidden border-2 transition-colors duration-150 ${
 					isActive && parentDirection !== null
 						? "border-primary/15"
 						: "border-transparent"
 				}`}
-				onMouseDown={context.actions.focus}
+				onPointerDownCapture={context.actions.focus}
 			>
 				<PaneHeader
 					title={title}
@@ -260,7 +272,7 @@ export function Pane<TData>({
 					titleContent={titleContent}
 					headerExtras={headerExtras}
 					toolbar={toolbar}
-					actionsContent={<context.components.PaneHeaderActions />}
+					actionsContent={context.headerActions}
 					paneId={pane.id}
 					onClick={
 						definition?.onHeaderClick
@@ -269,15 +281,32 @@ export function Pane<TData>({
 					}
 					onMiddleClick={context.actions.close}
 				/>
-				<PaneContent>
-					{definition ? (
-						definition.renderPane(context)
-					) : (
-						<div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
-							Unknown pane kind: {pane.kind}
-						</div>
-					)}
-				</PaneContent>
+				<PaneErrorBoundary
+					resetKey={pane.data}
+					onClose={context.actions.close}
+					onError={onPaneError}
+				>
+					<PaneContent
+						render={() =>
+							definition ? (
+								definition.renderPane(context)
+							) : (
+								<PaneFallback
+									title={<Trans>This pane can't be shown</Trans>}
+									detail={<Trans>Unknown pane type: {paneKind}</Trans>}
+								>
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={context.actions.close}
+									>
+										<Trans>Close pane</Trans>
+									</Button>
+								</PaneFallback>
+							)
+						}
+					/>
+				</PaneErrorBoundary>
 				{isDropTarget && <DropZoneOverlay position={dropPosition} />}
 			</div>
 		</PaneContextMenu>

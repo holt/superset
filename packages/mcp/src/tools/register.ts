@@ -16,10 +16,8 @@ import * as automationsPause from "./automations/pause";
 import * as automationsResume from "./automations/resume";
 import * as automationsRun from "./automations/run";
 import * as automationsSetPrompt from "./automations/set_prompt";
+import * as automationsTriggerOptions from "./automations/trigger_options";
 import * as automationsUpdate from "./automations/update";
-import * as cloudWorkspacesCreate from "./cloud-workspaces/create";
-import * as cloudWorkspacesDelete from "./cloud-workspaces/delete";
-import * as cloudWorkspacesList from "./cloud-workspaces/list";
 import * as hostsList from "./hosts/list";
 import * as organizationMembersList from "./organization/members/list";
 import * as pagesCommentsList from "./pages/comments/list";
@@ -64,15 +62,13 @@ const REGISTRARS = [
 	automationsDelete,
 	automationsPause,
 	automationsResume,
+	automationsTriggerOptions,
 	automationsRun,
 	automationsLogs,
 	workspacesList,
 	workspacesCreate,
 	workspacesUpdate,
 	workspacesDelete,
-	cloudWorkspacesList,
-	cloudWorkspacesCreate,
-	cloudWorkspacesDelete,
 	agentsCreate,
 	agentsList,
 	terminalsCreate,

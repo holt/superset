@@ -1,7 +1,7 @@
 interface ChangedFileStats {
 	path: string;
-	additions: number;
-	deletions: number;
+	additions: number | null;
+	deletions: number | null;
 }
 
 interface ChangesPillInput {
@@ -17,7 +17,7 @@ export interface ChangesPillStats {
 }
 
 /**
- * Unique-path totals for the top-bar pill. Working-tree entries override the
+ * Unique-path totals for the Changes control. Working-tree entries override the
  * against-base row for the same path (and unstaged overrides staged) — the
  * same precedence the host uses for workspace-list diff stats and the
  * Changes pane's tree dedupe, so a path counts once with its most current
@@ -33,8 +33,8 @@ export function changesPillStats(status: ChangesPillInput): ChangesPillStats {
 	let additions = 0;
 	let deletions = 0;
 	for (const file of byPath.values()) {
-		additions += file.additions;
-		deletions += file.deletions;
+		additions += file.additions ?? 0;
+		deletions += file.deletions ?? 0;
 	}
 	return { fileCount: byPath.size, additions, deletions };
 }

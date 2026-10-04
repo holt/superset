@@ -11,6 +11,7 @@ import { Alert, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Text } from "@/components/ui/text";
 import { useDeleteAccount } from "@/hooks/useDeleteAccount";
+import { useReadableInset } from "@/hooks/useReadableInset";
 import { useSignOut } from "@/hooks/useSignOut";
 import { useTheme } from "@/hooks/useTheme";
 import { useSession } from "@/lib/auth/client";
@@ -42,7 +43,7 @@ export function SettingsScreen() {
 	const theme = useTheme();
 	const insets = useSafeAreaInsets();
 	const { data: session } = useSession();
-	const { activeOrganization } = useOrganizations();
+	const { activeOrganization, activeOrganizationId } = useOrganizations();
 	const { signOut, isSigningOut } = useSignOut();
 	const { deleteAccount, isDeleting } = useDeleteAccount();
 
@@ -79,7 +80,7 @@ export function SettingsScreen() {
 					text: t({ message: "Dismiss" }),
 				},
 				{
-					onPress: () => openUrl(billingSettingsUrl()),
+					onPress: () => openUrl(billingSettingsUrl(activeOrganizationId)),
 					text: t({ message: `Manage on ${COMPANY.DOMAIN}` }),
 				},
 			],
@@ -122,11 +123,15 @@ export function SettingsScreen() {
 		);
 	};
 
+	// 24pt (px-6) on a phone; a centered column on iPad.
+	const readableInset = useReadableInset(24);
 	return (
 		<ScrollView
 			className="bg-background flex-1"
-			contentContainerClassName="px-6"
-			contentContainerStyle={{ paddingBottom: insets.bottom }}
+			contentContainerStyle={{
+				paddingBottom: insets.bottom,
+				paddingHorizontal: readableInset,
+			}}
 		>
 			<View className="items-center pt-4">
 				<UserAvatar
@@ -187,6 +192,26 @@ export function SettingsScreen() {
 					}
 					onPress={() => router.push("/(authenticated)/settings/organization")}
 				/>
+				{plan ? (
+					<ListRow
+						icon={
+							<Ionicons
+								name="document-text-outline"
+								size={20}
+								color={theme.mutedForeground}
+							/>
+						}
+						label={t({ message: "Pages" })}
+						trailing={
+							<Ionicons
+								name="chevron-forward"
+								size={18}
+								color={theme.mutedForeground}
+							/>
+						}
+						onPress={() => router.push("/(authenticated)/pages")}
+					/>
+				) : null}
 				<ListRow
 					icon={
 						<Ionicons

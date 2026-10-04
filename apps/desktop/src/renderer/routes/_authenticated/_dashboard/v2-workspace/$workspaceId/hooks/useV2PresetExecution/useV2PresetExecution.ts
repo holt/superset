@@ -5,11 +5,12 @@ import { workspaceTrpc } from "@superset/workspace-client";
 import { useLiveQuery } from "@tanstack/react-db";
 import { useCallback, useMemo } from "react";
 import { useV2AgentConfigs } from "renderer/hooks/useV2AgentConfigs";
-import { resolvePresetLaunchCommands } from "renderer/lib/agent-launch-command";
+import { acpHarnessForPreset } from "renderer/lib/acpHarness";
 import {
-	buildTerminalCommand,
-	normalizeTerminalCommand,
-} from "renderer/lib/terminal/launch-command";
+	findLinkedAgent,
+	resolvePresetLaunchCommands,
+} from "renderer/lib/agent-launch-command";
+import { buildTerminalCommand } from "renderer/lib/terminal/launch-command";
 import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import type { V2TerminalPresetRow } from "renderer/routes/_authenticated/providers/CollectionsProvider/dashboardSidebarLocal";
@@ -21,6 +22,7 @@ import { getPresetsForTriggerField } from "shared/preset-trigger-selection";
 import { quote } from "shell-quote";
 import type { StoreApi } from "zustand/vanilla";
 import type { PaneViewerData, TerminalPaneData } from "../../types";
+import type { OpenAgentChat } from "../useAgentSessionLauncher";
 import type { TerminalLauncher } from "../useV2TerminalLauncher";
 
 function makeTerminalPane(
@@ -83,11 +85,13 @@ function buildFocusedTerminalCommand({
 interface UseV2PresetExecutionArgs {
 	store: StoreApi<WorkspaceStore<PaneViewerData>>;
 	launcher: TerminalLauncher;
+	openAgentChat: OpenAgentChat;
 }
 
 export function useV2PresetExecution({
 	store,
 	launcher,
+	openAgentChat,
 }: UseV2PresetExecutionArgs) {
 	const { t } = useLingui();
 	const { workspace } = useWorkspace();
@@ -100,7 +104,7 @@ export function useV2PresetExecution({
 			refetchOnWindowFocus: false,
 		},
 	);
-	const writeInput = workspaceTrpc.terminal.writeInput.useMutation();
+	const sendToTerminal = workspaceTrpc.terminal.send.useMutation();
 
 	const { data: allPresets = [] } = useLiveQuery(
 		(query) =>
@@ -171,6 +175,19 @@ export function useV2PresetExecution({
 				hasActiveTerminal: !!activeTerminal,
 			});
 
+			const linkedAgent = findLinkedAgent(agents, preset.agentId);
+			if (
+				linkedAgent &&
+				acpHarnessForPreset(linkedAgent.presetId) &&
+				(plan === "new-tab-single" || plan === "active-tab-single")
+			) {
+				const chat = await openAgentChat({
+					configId: linkedAgent.id,
+					placement: plan === "active-tab-single" ? "split-pane" : "new-tab",
+				});
+				if (chat) return;
+			}
+
 			// Sessions for every pane this plan creates are spun up in parallel
 			// before any of them land in the store, so background tabs (e.g.
 			// new-tab-per-command, where each addTab flips activeTabId and only
@@ -182,16 +199,15 @@ export function useV2PresetExecution({
 					case "active-terminal": {
 						const command = launchCommands[0];
 						if (!activeTerminal || !command) break;
-						await writeInput.mutateAsync({
+						await sendToTerminal.mutateAsync({
 							terminalId: activeTerminal.terminalId,
 							workspaceId,
-							data: normalizeTerminalCommand(
-								buildFocusedTerminalCommand({
-									command,
-									cwd,
-									worktreePath: workspaceQuery.data?.worktreePath,
-								}),
-							),
+							text: buildFocusedTerminalCommand({
+								command,
+								cwd,
+								worktreePath: workspaceQuery.data?.worktreePath,
+							}),
+							submit: true,
 						});
 						if (title && !activeTerminal.titleOverride?.trim()) {
 							// Reused terminals keep their existing pane, so apply the
@@ -295,7 +311,9 @@ export function useV2PresetExecution({
 			t,
 			workspaceId,
 			workspaceQuery.data?.worktreePath,
-			writeInput,
+			sendToTerminal,
+			agents,
+			openAgentChat,
 		],
 	);
 

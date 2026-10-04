@@ -10,11 +10,13 @@ import { githubRouter } from "./github";
 import { healthRouter } from "./health";
 import { hostRouter } from "./host";
 import { issuesRouter } from "./issues";
+import { mobileRouter } from "./mobile";
 import { notificationsRouter } from "./notifications";
 import { pageWatchRouter } from "./page-watch";
 import { portsRouter } from "./ports";
 import { projectRouter } from "./project";
 import { pullRequestsRouter } from "./pull-requests";
+import { sandboxRouter } from "./sandbox";
 import { settingsRouter } from "./settings";
 import { systemRouter } from "./system";
 import { tagFoldersRouter } from "./tag-folders";
@@ -38,12 +40,14 @@ export const appRouter = router({
 	git: gitRouter,
 	github: githubRouter,
 	issues: issuesRouter,
+	mobile: mobileRouter,
 	notifications: notificationsRouter,
 	pullRequests: pullRequestsRouter,
 	project: projectRouter,
 	tagFolders: tagFoldersRouter,
 	pageWatch: pageWatchRouter,
 	ports: portsRouter,
+	sandbox: sandboxRouter,
 	settings: settingsRouter,
 	system: systemRouter,
 	terminal: terminalRouter,

@@ -1,112 +1,70 @@
-import { db, dbWs } from "@superset/db/client";
-import {
-	integrationConnections,
-	type LinearConfig,
-	taskStatuses,
-	tasks,
-} from "@superset/db/schema";
-import { seedDefaultStatuses } from "@superset/db/seed-default-statuses";
+import { db } from "@superset/db/client";
+import { connections, type LinearConfig } from "@superset/db/schema";
 import type { TRPCRouterRecord } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
+import { userConnection } from "../../../lib/connectors";
 import { protectedProcedure } from "../../../trpc";
-import { disconnectProcedure } from "../connections";
 import { verifyOrgAdmin, verifyOrgMembership } from "../utils";
-import { callLinear } from "./refresh";
+import { linearLiveRouter } from "./live";
+import { callLinear, callLinearForConnection } from "./refresh";
+import { trackTasksInSupersetWithoutLinear } from "./tracker";
 
 export const linearRouter = {
+	...linearLiveRouter,
+
 	getConnection: protectedProcedure
 		.input(z.object({ organizationId: z.uuid() }))
 		.query(async ({ ctx, input }) => {
 			await verifyOrgMembership(ctx.session.user.id, input.organizationId);
-			const connection = await db.query.integrationConnections.findFirst({
-				where: and(
-					eq(integrationConnections.organizationId, input.organizationId),
-					eq(integrationConnections.provider, "linear"),
-				),
-				columns: {
-					id: true,
-					config: true,
-					disconnectedAt: true,
-					disconnectReason: true,
-				},
-			});
+			const connection = await userConnection(
+				input.organizationId,
+				"linear",
+				ctx.session.user.id,
+				{ includeDisconnected: true },
+			);
 			if (!connection) return null;
 			return {
-				config: connection.config as LinearConfig | null,
+				config:
+					connection.state?.provider === "linear" ? connection.state : null,
 				needsReconnect: !!connection.disconnectedAt,
 				disconnectReason: connection.disconnectReason,
+				externalOrgName: connection.externalAccountLabel,
 			};
 		}),
 
-	disconnect: disconnectProcedure("linear", async (_, organizationId) => {
-		try {
-			await callLinear(organizationId, (client) => client.logout());
-		} catch {}
-
-		await dbWs.transaction(async (tx) => {
-			// 1. Delete Linear-synced tasks
-			await tx
-				.delete(tasks)
-				.where(
-					and(
-						eq(tasks.organizationId, organizationId),
-						eq(tasks.externalProvider, "linear"),
-					),
-				);
-
-			// 2. Seed default statuses inside the transaction
-			const backlogStatusId = await seedDefaultStatuses(organizationId, tx);
-
-			// 3. Remap remaining local tasks from Linear statuses to default statuses
-			const allStatuses = await tx.query.taskStatuses.findMany({
-				where: eq(taskStatuses.organizationId, organizationId),
-			});
-
-			const defaultStatusByType = new Map<string, string>();
-			for (const status of allStatuses) {
-				if (!status.externalProvider && status.type) {
-					if (!defaultStatusByType.has(status.type)) {
-						defaultStatusByType.set(status.type, status.id);
-					}
-				}
+	disconnect: protectedProcedure
+		.input(z.object({ organizationId: z.uuid() }))
+		.mutation(async ({ ctx, input }) => {
+			await verifyOrgMembership(ctx.session.user.id, input.organizationId);
+			const connection = await userConnection(
+				input.organizationId,
+				"linear",
+				ctx.session.user.id,
+				{ includeDisconnected: true },
+			);
+			if (!connection) {
+				return { success: false, error: "No connection found" };
 			}
 
-			for (const status of allStatuses) {
-				if (status.externalProvider === "linear") {
-					const defaultStatusId =
-						(status.type && defaultStatusByType.get(status.type)) ||
-						backlogStatusId;
-					await tx
-						.update(tasks)
-						.set({ statusId: defaultStatusId })
-						.where(
-							and(
-								eq(tasks.organizationId, organizationId),
-								eq(tasks.statusId, status.id),
-							),
-						);
-				}
-			}
-
-			// 4. Delete Linear task statuses
-			await tx
-				.delete(taskStatuses)
-				.where(
-					and(
-						eq(taskStatuses.organizationId, organizationId),
-						eq(taskStatuses.externalProvider, "linear"),
-					),
+			try {
+				await callLinearForConnection(connection.id, (client) =>
+					client.logout(),
 				);
-		});
-	}),
+			} catch {}
+			await db.delete(connections).where(eq(connections.id, connection.id));
+			await trackTasksInSupersetWithoutLinear(input.organizationId);
+			return { success: true };
+		}),
 
 	getTeams: protectedProcedure
 		.input(z.object({ organizationId: z.uuid() }))
 		.query(async ({ ctx, input }) => {
 			await verifyOrgMembership(ctx.session.user.id, input.organizationId);
-			const teams = await callLinear(input.organizationId, (client) =>
-				client.teams(),
+			const teams = await callLinear(
+				input.organizationId,
+				ctx.session.user.id,
+				(client) => client.teams(),
 			);
 			if (!teams) return [];
 			return teams.nodes.map((t) => ({ id: t.id, name: t.name, key: t.key }));
@@ -128,12 +86,12 @@ export const linearRouter = {
 			};
 
 			await db
-				.update(integrationConnections)
-				.set({ config })
+				.update(connections)
+				.set({ state: config })
 				.where(
 					and(
-						eq(integrationConnections.organizationId, input.organizationId),
-						eq(integrationConnections.provider, "linear"),
+						eq(connections.organizationId, input.organizationId),
+						eq(connections.connector, "linear"),
 					),
 				);
 

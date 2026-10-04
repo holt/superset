@@ -15,11 +15,14 @@ import {
 } from "@superset/ui/dropdown-menu";
 import { Input } from "@superset/ui/input";
 import { Separator } from "@superset/ui/separator";
+import { useQueryClient } from "@tanstack/react-query";
 import { useFeatureFlagPayload } from "posthog-js/react";
 import { type ReactNode, useMemo, useState } from "react";
 import { LuPlus } from "react-icons/lu";
+import { ConnectConnectorDialog } from "renderer/components/ConnectorSection";
 import { useCurrentPlan } from "renderer/hooks/useCurrentPlan";
-import { providerFor, TRIGGER_PROVIDERS } from "../providers";
+import { cloudTrpc } from "renderer/lib/cloud-trpc";
+import { connectorFor, providerFor, TRIGGER_PROVIDERS } from "../providers";
 import type { OptionGroupState, ProviderOptions } from "../providers/types";
 import { useProviderConnections } from "../providers/useProviderConnections";
 import { TriggerSentence } from "../TriggerSentence";
@@ -58,18 +61,47 @@ export function TriggersEditor({
 }: TriggersEditorProps) {
 	const { _: translate } = useTranslation();
 
-	const add = (config: DraftTrigger["config"]) =>
-		onEdit([...drafts, { config }]);
-
 	const { plan } = useCurrentPlan();
-	const { connected, isPending: connectionsPending } =
-		useProviderConnections(organizationId);
+	const {
+		connected,
+		needsReauth,
+		accounts,
+		isPending: connectionsPending,
+	} = useProviderConnections(organizationId);
+	const [connecting, setConnecting] = useState<string | null>(null);
+	const utils = cloudTrpc.useUtils();
+	const queryClient = useQueryClient();
 
 	const missingConnection = (config: DraftTrigger["config"]) => {
 		if (connectionsPending) return false;
-		const required = providerFor(config).connectionProvider;
-		return required !== undefined && !connected[required];
+		const required = connectorFor(providerFor(config));
+		return required !== null && !connected[required];
 	};
+
+	const expiredConnection = (config: DraftTrigger["config"]) => {
+		const required = connectorFor(providerFor(config));
+		return required !== null && Boolean(needsReauth[required]);
+	};
+
+	const connectorAccounts = (config: DraftTrigger["config"]) => {
+		const required = connectorFor(providerFor(config));
+		return required === null ? [] : (accounts[required] ?? []);
+	};
+
+	// A new trigger starts on one account rather than all of them. Unpinned
+	// means every connection on the connector, which for an org-wide provider
+	// includes a teammate's — wider than the picker, which lists only yours. An
+	// expired account is listed but cannot deliver, so it is never the default.
+	const add = (config: DraftTrigger["config"]) =>
+		onEdit([
+			...drafts,
+			{
+				config,
+				connectionId:
+					connectorAccounts(config).find((account) => !account.needsReauth)
+						?.id ?? null,
+			},
+		]);
 
 	const runtimeWarnings = useMemo(
 		() => collectRuntimeWarnings(drafts, options, plan),
@@ -108,6 +140,7 @@ export function TriggersEditor({
 			<div className="rounded-[12px] bg-foreground/[0.04] p-1">
 				{drafts.map((trigger, index) => (
 					<TriggerSentence
+						onConnect={setConnecting}
 						key={trigger.id ?? `draft-${index}`}
 						trigger={trigger}
 						onChange={(next) =>
@@ -123,6 +156,8 @@ export function TriggersEditor({
 								: undefined
 						}
 						requiresConnection={missingConnection(trigger.config)}
+						needsReauth={expiredConnection(trigger.config)}
+						accounts={connectorAccounts(trigger.config)}
 						disabled={readOnly}
 					/>
 				))}
@@ -132,7 +167,10 @@ export function TriggersEditor({
 				)}
 
 				<DropdownMenu onOpenChange={() => setQuery("")}>
-					<DropdownMenuTrigger asChild disabled={readOnly}>
+					<DropdownMenuTrigger
+						asChild
+						disabled={readOnly || connectionsPending}
+					>
 						<Button
 							type="button"
 							variant="ghost"
@@ -206,6 +244,19 @@ export function TriggersEditor({
 			    them: these outlive any save, so they cannot live in the
 			    submit-gated banner. */}
 			<RuntimeWarnings warnings={runtimeWarnings} />
+
+			<ConnectConnectorDialog
+				slug={connecting}
+				organizationId={organizationId}
+				onOpenChange={(open) => {
+					if (open) return;
+					setConnecting(null);
+					void utils.integration.connectionStatus.invalidate();
+					void queryClient.invalidateQueries({
+						queryKey: ["integration.triggerOptions"],
+					});
+				}}
+			/>
 		</div>
 	);
 }

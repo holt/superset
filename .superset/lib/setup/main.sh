@@ -61,7 +61,21 @@ setup_main() {
     step_failed "Write .env file"
   fi
 
-  # Step 9: Setup local MCP in .mcp.json (opt-in)
+  # Step 9: Fill keys the root .env lacks with fakes from .env.local.example
+  if ! step_seed_env_placeholders; then
+    step_failed "Seed .env placeholders"
+  fi
+
+  # Step 10: Prove the API can load this .env
+  if ! step_validate_env; then
+    step_failed "Validate .env"
+  fi
+
+  # Step 10.5: Mobile dev sign-in, from whatever desktop sign-in already
+  # exists on this machine. Best-effort — see the step's own comment.
+  step_seed_local_mobile_token
+
+  # Step 11: Setup local MCP in .mcp.json (opt-in)
   if [ "$SETUP_LOCAL_MCP" = "1" ]; then
     if ! step_setup_local_mcp; then
       step_failed "Setup local MCP"

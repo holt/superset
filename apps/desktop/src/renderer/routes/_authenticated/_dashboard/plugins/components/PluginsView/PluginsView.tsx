@@ -32,9 +32,9 @@ export function PluginsView() {
 	} = usePluginCatalog();
 
 	const isConnected = (plugin: CatalogPlugin) =>
-		plugin.installed && (!plugin.auth || plugin.connections.length > 0);
+		plugin.installed && (!plugin.connector || plugin.connections.length > 0);
 
-	const { uninstall, setEnabled, update, isBusy } = usePluginMutations();
+	const { add, uninstall, setEnabled, update, isBusy } = usePluginMutations();
 
 	const handleOpen = (plugin: CatalogPlugin) => {
 		navigate({
@@ -102,6 +102,7 @@ export function PluginsView() {
 			isDisabled={plugin.installed && !plugin.enabled}
 			isBusy={isBusy}
 			onOpen={handleOpen}
+			onInstall={(target) => void add(target.name)}
 			onUninstall={(target) => uninstall(target.name)}
 			onSetEnabled={setEnabled}
 			onUpdate={(name) => void update(name)}
@@ -109,7 +110,7 @@ export function PluginsView() {
 	);
 
 	return (
-		<div className="mx-auto w-full max-w-3xl px-6 pb-16">
+		<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-16">
 			<Tabs defaultValue="plugins">
 				<TabsList className="mb-6">
 					<TabsTrigger value="plugins">

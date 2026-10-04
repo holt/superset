@@ -2,13 +2,14 @@ import { CLIError } from "@superset/cli-framework";
 import { type ApiClient, createApiClient } from "./api-client";
 import { refreshAccessToken } from "./auth";
 import {
+	AUTH_REFRESH_LEEWAY_MS,
 	readConfig,
 	resolveOrganizationId,
 	type SupersetConfig,
 	writeConfig,
 } from "./config";
 
-export type AuthSource = "override" | "config" | "oauth";
+export type AuthSource = "override" | "config" | "oauth" | "sandbox";
 
 export type ResolvedAuth = {
 	config: SupersetConfig;
@@ -16,8 +17,6 @@ export type ResolvedAuth = {
 	bearer: string;
 	authSource: AuthSource;
 };
-
-const REFRESH_LEEWAY_MS = 5 * 60 * 1000;
 
 export async function resolveAuth(
 	apiKeyOption: string | undefined,
@@ -39,7 +38,7 @@ export async function resolveAuth(
 		authSource = "config";
 	} else if (config.auth) {
 		const auth = config.auth;
-		if (auth.expiresAt - REFRESH_LEEWAY_MS < Date.now()) {
+		if (auth.expiresAt - AUTH_REFRESH_LEEWAY_MS < Date.now()) {
 			if (!auth.refreshToken) {
 				throw new CLIError("Session expired", "Run: superset auth login");
 			}
@@ -62,6 +61,12 @@ export async function resolveAuth(
 			bearer = auth.accessToken;
 		}
 		authSource = "oauth";
+	} else if (process.env.SUPERSET_SANDBOX_WORKSPACE_ID) {
+		// A cloud workspace holds no credential: the firewall adds one to
+		// requests for the API, and it names the workspace rather than a
+		// person. Nothing to send from here, and nothing to refresh.
+		bearer = "";
+		authSource = "sandbox";
 	} else {
 		throw new CLIError(
 			"Not logged in",

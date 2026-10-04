@@ -9,6 +9,9 @@ interface DeadKey {
  * the writer.
  */
 export const DEAD_KEYS: DeadKey[] = [
+	// The task page's inline agent picker; Start work opens New Workspace instead
+	{ key: "lastSelectedV2TaskAgent", match: "exact" },
+	{ key: "getting-started-v1", match: "exact" },
 	// Pending-create records; superseded by canonical workspaces.create (#3893)
 	{ key: "pending-workspaces-", match: "prefix" },
 	// v1→v2 preset migration marker; superseded by pull-based importer (#4122)
@@ -39,6 +42,10 @@ export const DEAD_KEYS: DeadKey[] = [
 	{ key: "v2-available-banner-v1", match: "exact" },
 	// Bumped to v2 so updated clients republish a full 30-day leaderboard window
 	{ key: "leaderboard-auto-publish-v1", match: "exact" },
+	// Launch-time "join the leaderboard" prompt removed; joining lives in settings
+	{ key: "leaderboard-asked-v1", match: "exact" },
+	// Opening a page no longer routes to the last-visited workspace
+	{ key: "last-active-v2-workspace", match: "exact" },
 ];
 
 function matchesDeadKey(key: string): boolean {

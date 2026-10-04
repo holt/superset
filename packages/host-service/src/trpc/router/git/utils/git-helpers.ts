@@ -355,6 +355,7 @@ export async function countUntrackedFileLines(
 				// the \n, so counting \n bytes is equivalent.)
 				file.additions =
 					lastByte === -1 ? 0 : lastByte === 0x0a ? newlines : newlines + 1;
+				file.deletions = 0;
 			} finally {
 				await handle.close();
 			}
@@ -376,7 +377,9 @@ export interface DetectedRename {
  * index to a temp file, marking untracked files intent-to-add against that
  * copy, and diffing. Real index is never mutated. Falls back to an empty
  * result on any error — caller still has the unrelated deleted+untracked
- * entries to display.
+ * entries to display. Only renames onto `untrackedPaths` are returned: the
+ * diff also repeats renames git status already reported for files that are
+ * intent-to-add in the real index.
  */
 export async function detectUnstagedRenames(
 	git: SimpleGit,
@@ -412,7 +415,12 @@ export async function detectUnstagedRenames(
 			GIT_INDEX_FILE: tempIndex,
 		});
 
-		await tempGit.raw(["add", "--intent-to-add", "--", ...untrackedPaths]);
+		await tempGit.raw([
+			"add",
+			"--intent-to-add",
+			"--",
+			...untrackedPaths.map((path) => `:(literal)${path}`),
+		]);
 
 		const [nameStatusRaw, numstatRaw] = await Promise.all([
 			tempGit.raw(["diff", "--name-status", "-z", "-M"]),
@@ -422,9 +430,10 @@ export async function detectUnstagedRenames(
 		const nameStatus = parseNameStatus(nameStatusRaw);
 		const numstat = parseNumstat(numstatRaw);
 
+		const markedPaths = new Set(untrackedPaths);
 		const result: DetectedRename[] = [];
 		for (const entry of nameStatus) {
-			if (!entry.oldPath) continue;
+			if (!entry.oldPath || !markedPaths.has(entry.path)) continue;
 			const code = entry.status[0];
 			if (code !== "R") continue;
 			const stats = numstat.get(entry.path) ?? {
@@ -601,4 +610,42 @@ export async function loadFileDiffContent(
 		oldFile: { name: fileName, contents: originalContent },
 		newFile: { name: fileName, contents: modifiedContent },
 	};
+}
+
+/**
+ * Expand the `dir/` entries `--untracked-files=normal` collapses back into the
+ * individual files `-uall` would have listed, keyed by the collapsed entry.
+ * The walk is scoped to the untracked directories themselves rather than the
+ * whole worktree, so it costs a fraction of what `-uall` does — and nothing at
+ * all in the common case where there are no untracked directories.
+ */
+export async function expandUntrackedDirectories(
+	git: SimpleGit,
+	untrackedPaths: string[],
+): Promise<Map<string, string[]>> {
+	const dirs = untrackedPaths.filter((path) => path.endsWith("/"));
+	const expanded = new Map<string, string[]>();
+	if (dirs.length === 0) return expanded;
+
+	// `--exclude-standard` matches what status itself honours, including
+	// .gitignore files nested inside the untracked directory.
+	const raw = await git
+		.raw([
+			"ls-files",
+			"--others",
+			"--exclude-standard",
+			"-z",
+			"--",
+			...dirs.map((dir) => `:(literal)${dir}`),
+		])
+		.catch(() => "");
+
+	for (const path of raw.split("\0").filter(Boolean)) {
+		const dir = dirs.find((candidate) => path.startsWith(candidate));
+		if (!dir) continue;
+		const files = expanded.get(dir);
+		if (files) files.push(path);
+		else expanded.set(dir, [path]);
+	}
+	return expanded;
 }

@@ -3,17 +3,16 @@ import { rm } from "node:fs/promises";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
 import { projects } from "../../../db/schema";
-import { emitProjectChanged } from "../../../projects/local-project-store";
+import { restoreProject } from "../../../projects/project-deletion";
 import type { HostServiceContext } from "../../../types";
-import { ensureMainWorkspaceStrict } from "./utils/ensure-main-workspace";
 import { persistLocalProject } from "./utils/persist-project";
 import {
+	adoptLocalRepo,
 	cloneRepoInto,
 	cloneTemplateInto,
 	initEmptyRepo,
 	initLocalRepoInPlace,
 	type ResolvedRepo,
-	resolveLocalRepo,
 	tryRevParseGitRoot,
 } from "./utils/resolve-repo";
 
@@ -34,7 +33,6 @@ function dirNameForEmpty(name: string): string {
 export interface CreateResult {
 	projectId: string;
 	repoPath: string;
-	mainWorkspaceId: string;
 	/** False when an existing local project row for the same repo path was
 	 * reused instead of inserting a new one (importLocal only). Callers use
 	 * this to skip side effects that would clobber user customizations. */
@@ -46,9 +44,10 @@ export interface CreateResult {
  *
  *   1. Local file ops (handled by the caller — clone / mkdir / etc.)
  *   2. Local DB project row (host-minted UUID)
- *   3. Local main workspace (ensureMainWorkspaceStrict)
  *
- * A failure in 2–3 unwinds locally.
+ * A project starts with zero workspaces; the user creates a local or
+ * worktree workspace when they open it. A failure in step 2 unwinds the
+ * file ops when the caller asked for that.
  */
 async function persistFromResolved(
 	ctx: HostServiceContext,
@@ -59,36 +58,9 @@ async function persistFromResolved(
 	},
 ): Promise<CreateResult> {
 	const projectId = randomUUID();
-	let localProjectInserted = false;
-
 	try {
 		persistLocalProject(ctx, projectId, args.resolved, { name: args.name });
-		localProjectInserted = true;
-
-		const mainWorkspace = await ensureMainWorkspaceStrict(
-			ctx,
-			projectId,
-			args.resolved.repoPath,
-		);
-
-		return {
-			projectId,
-			repoPath: args.resolved.repoPath,
-			mainWorkspaceId: mainWorkspace.id,
-			created: true,
-		};
 	} catch (err) {
-		if (localProjectInserted) {
-			try {
-				ctx.db.delete(projects).where(eq(projects.id, projectId)).run();
-				emitProjectChanged(ctx.eventBus, "deleted", projectId);
-			} catch (cleanupErr) {
-				console.warn("[project.create] local rollback failed", {
-					projectId,
-					cleanupErr,
-				});
-			}
-		}
 		if (args.cleanupRepoPathOnFailure) {
 			try {
 				await rm(args.resolved.repoPath, { recursive: true, force: true });
@@ -101,16 +73,18 @@ async function persistFromResolved(
 		}
 		throw err;
 	}
+	return { projectId, repoPath: args.resolved.repoPath, created: true };
 }
 
 export async function createFromClone(
 	ctx: HostServiceContext,
-	args: { name: string; parentDir: string; url: string },
+	args: { name: string; parentDir: string; url: string; signal?: AbortSignal },
 ): Promise<CreateResult> {
 	const resolved = await cloneRepoInto(
 		args.url,
 		args.parentDir,
 		ctx.credentials,
+		args.signal,
 	);
 	return persistFromResolved(ctx, {
 		name: args.name,
@@ -128,9 +102,9 @@ async function resolveOrInitLocalRepo(
 	repoPath: string,
 	initIfNeeded: boolean,
 ): Promise<ResolvedRepo> {
-	if (!initIfNeeded) return resolveLocalRepo(repoPath);
+	if (!initIfNeeded) return adoptLocalRepo(repoPath);
 	const root = await tryRevParseGitRoot(repoPath);
-	return root ? resolveLocalRepo(root) : initLocalRepoInPlace(repoPath);
+	return root ? adoptLocalRepo(root) : initLocalRepoInPlace(repoPath);
 }
 
 export async function createFromImportLocal(
@@ -150,15 +124,10 @@ export async function createFromImportLocal(
 		.findFirst({ where: eq(projects.repoPath, resolved.repoPath) })
 		.sync();
 	if (existing) {
-		const mainWorkspace = await ensureMainWorkspaceStrict(
-			ctx,
-			existing.id,
-			resolved.repoPath,
-		);
+		restoreProject(ctx, existing.id);
 		return {
 			projectId: existing.id,
 			repoPath: resolved.repoPath,
-			mainWorkspaceId: mainWorkspace.id,
 			created: false,
 		};
 	}

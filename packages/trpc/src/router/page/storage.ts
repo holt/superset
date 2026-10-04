@@ -16,6 +16,7 @@ import {
 } from "@superset/shared/usercontent";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { env } from "../../env";
+import { notifyPageHub } from "../../lib/page-store";
 import { deleteObjects, putObject } from "../../lib/r2";
 
 // Expiry is rounded to a window boundary so identical claims give an
@@ -38,6 +39,12 @@ export async function writePageManifest(pageId: string): Promise<void> {
 		.where(eq(pages.id, pageId))
 		.limit(1);
 	if (!page) return;
+
+	if (page.takenDownAt) {
+		await thrice(() => deleteObjects([pageManifestKey(pageId)]));
+		notifyPageHub(pageId);
+		return;
+	}
 
 	const rows = await db
 		.select({
@@ -86,6 +93,8 @@ export async function writePageManifest(pageId: string): Promise<void> {
 		pageId,
 		slug: page.slug,
 		visibility: page.visibility,
+		organizationId: page.organizationId,
+		createdByUserId: page.createdByUserId,
 		sharedVersion: page.sharedVersion,
 		latestVersion: rows.at(-1)?.version ?? null,
 		versions: Object.fromEntries(
@@ -103,19 +112,27 @@ export async function writePageManifest(pageId: string): Promise<void> {
 		),
 	};
 
-	// The manifest is the Worker's authorization source, so its write gets a
-	// short retry before the caller's error surfaces; a crash between the
-	// database commit and this write is repaired by the next caller (durable
-	// reconciliation is a recorded follow-up).
+	await thrice(() =>
+		putObject({
+			key: pageManifestKey(pageId),
+			body: JSON.stringify(manifest),
+			contentType: "application/json",
+			bucket: "private",
+		}),
+	);
+
+	notifyPageHub(pageId);
+}
+
+// The manifest is the Worker's authorization source, so both writing it and
+// deleting it get a short retry before the caller's error surfaces; a crash
+// between the database commit and the object store is repaired by the next
+// caller (durable reconciliation is a recorded follow-up).
+async function thrice(write: () => Promise<unknown>): Promise<void> {
 	let lastError: unknown;
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try {
-			await putObject({
-				key: pageManifestKey(pageId),
-				body: JSON.stringify(manifest),
-				contentType: "application/json",
-				bucket: "private",
-			});
+			await write();
 			return;
 		} catch (error) {
 			lastError = error;
@@ -141,14 +158,15 @@ export async function deletePageObjects({
 }
 
 /**
- * A public page needs no ticket; anything narrower gets one bound to the
- * page and, when given, to a single version.
+ * A public page needs no ticket for the version its link resolves to;
+ * anything narrower — including another version of that same public page —
+ * gets one bound to the page and, when given, to a single version.
  */
 export async function mintPageTicket(
 	page: Pick<SelectPage, "id" | "visibility">,
 	{ version, ttlSeconds }: { version?: number; ttlSeconds?: number } = {},
 ): Promise<string | undefined> {
-	if (page.visibility === "everyone") return undefined;
+	if (page.visibility === "everyone" && version === undefined) return undefined;
 	const now = Math.floor(Date.now() / 1000);
 	const window =
 		version !== undefined

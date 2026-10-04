@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { boolean, positional, string, table } from "@superset/cli-framework";
+import {
+	boolean,
+	CLIError,
+	positional,
+	string,
+	table,
+} from "@superset/cli-framework";
 import { command } from "../../../lib/command";
 import { resolvePluginRef } from "../../../lib/plugins/host";
 import {
@@ -12,9 +18,14 @@ import {
 	ensureDefaultMarketplace,
 	installPlugin,
 } from "../../../lib/plugins/install";
-import { supersetExtension } from "../../../lib/plugins/marketplace";
+import { pluginConnector } from "../../../lib/plugins/marketplace";
+import {
+	refreshPluginConnectionsCache,
+	syncPluginMcpServers,
+} from "../../../lib/plugins/mcp-servers";
 
 export default command({
+	sandbox: false,
 	description:
 		"Install a plugin: materialize its skills locally and record it on your account",
 	args: [
@@ -64,19 +75,23 @@ export default command({
 			accountError = error instanceof Error ? error.message : String(error);
 		}
 
-		const methods =
-			supersetExtension(
-				JSON.parse(
-					fs.readFileSync(path.join(local.installPath, "plugin.json"), "utf8"),
-				),
-			)?.auth ?? [];
+		const slug = pluginConnector(
+			JSON.parse(
+				fs.readFileSync(path.join(local.installPath, "plugin.json"), "utf8"),
+			),
+		);
+
+		const connector = slug
+			? await ctx.api.connectors.get.query({ slug })
+			: null;
+		const methods = connector?.methods ?? [];
 		const auth = methods.length === 1 ? methods[0] : undefined;
 
 		let connection = accountError ? "account sync failed" : "not required";
 
 		if (account?.needsConnection && methods.length > 1) {
 			connection = `needs connection: superset plugins connect ${name} --method <${methods.map((m) => m.type).join("|")}>`;
-		} else if (account?.needsConnection && auth) {
+		} else if (account?.needsConnection && auth && slug) {
 			const connections = await ctx.api.plugins.connections.list.query({
 				plugin: name,
 			});
@@ -94,22 +109,36 @@ export default command({
 				if (missing.length) {
 					throw missingInputsError(name, missing, declared);
 				}
-				const created = await ctx.api.plugins.connectApiKey.mutate({
-					name,
+				const organization = await ctx.api.user.myOrganization.query();
+				if (!organization) {
+					throw new CLIError(
+						"You need to be part of an organization to connect accounts.",
+					);
+				}
+				await ctx.api.connectors.connectApiKey.mutate({
+					organizationId: organization.id,
+					slug,
 					inputs: provided,
 				});
-				connection = `connected as ${created.account ?? "unknown"}`;
+				connection = `connected ${slug}`;
 			} else {
 				connection = "authorize in a browser";
 			}
 		}
+
+		// Again at the end, because this command can connect an account itself and
+		// a connector's second account is what splits one MCP entry into two.
+		await refreshPluginConnectionsCache(ctx.api);
+		const mcp = syncPluginMcpServers();
 
 		const next =
 			connection === "authorize in a browser"
 				? ` Authorize it: superset plugins connect ${name}`
 				: accountError
 					? ` Its skills work, but tools will not until the account install succeeds: ${accountError}`
-					: "";
+					: mcp.error
+						? ` Its skills work, but no agent can reach its tools until the MCP config is writable: ${mcp.error}`
+						: "";
 
 		return {
 			data: [

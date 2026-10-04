@@ -1,15 +1,20 @@
 import { useLingui } from "@lingui/react/macro";
+import { startableCloudEnvironments } from "@superset/shared/cloud-environments";
+import { CLOUD_HOST_ID } from "@superset/shared/host-routing";
 import { toast } from "@superset/ui/sonner";
 import { useMatchRoute, useNavigate } from "@tanstack/react-router";
-import { useCallback } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useAwaitAcpChatEnabled } from "renderer/hooks/useAcpChatEnabled";
 import { useActiveOrganizationId } from "renderer/hooks/useActiveOrganizationId";
+import { acpHarnessForPreset } from "renderer/lib/acpHarness";
 import { cloudTrpc, cloudTrpcClient } from "renderer/lib/cloud-trpc";
+import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import { useLocalHostService } from "renderer/routes/_authenticated/providers/LocalHostServiceProvider";
 import type { NewWorkspacePromptContextApi } from "renderer/stores/new-workspace-prompt-context";
 import { usePromptHistoryStore } from "renderer/stores/prompt-history";
 import { useWorkspaceCreates } from "renderer/stores/workspace-creates";
+import { queuePendingChatHandoff } from "renderer/stores/workspace-creates/queuePendingChatHandoff";
 import { useDashboardNewWorkspaceDraft } from "../../../../../DashboardNewWorkspaceDraftContext";
-import { CLOUD_HOST_ID } from "../../../components/DevicePicker/DevicePicker";
 import type { WorkspaceCreateAgent } from "../../types";
 import type { UseUploadAttachmentsApi } from "../useUploadAttachments";
 import { resolveNames } from "./resolveNames";
@@ -23,6 +28,7 @@ import { resolveNames } from "./resolveNames";
 export function useSubmitWorkspace(
 	projectId: string | null,
 	selectedAgent: WorkspaceCreateAgent,
+	selectedPresetId: string | null,
 	selectedModel: string | null,
 	selectedEffort: string | null,
 	selectedMode: string | null,
@@ -35,13 +41,24 @@ export function useSubmitWorkspace(
 	const { closeAndResetDraft, draft } = useDashboardNewWorkspaceDraft();
 	const { submit } = useWorkspaceCreates();
 	const { machineId } = useLocalHostService();
+	const collections = useCollections();
 	const activeOrganizationId = useActiveOrganizationId();
+	const awaitAcpChatEnabled = useAwaitAcpChatEnabled();
 	const createCloudWorkspace = cloudTrpc.cloudWorkspace.create.useMutation();
 	const utils = cloudTrpc.useUtils();
 
 	const isSession = draft.isSession;
 
-	const submitWorkspace = useCallback(async () => {
+	// Submit is reachable from Cmd+Enter, the editor's Enter handler, and the
+	// create button, and it awaits uploads / environment lookup / prompt
+	// context before anything observable changes — `createCloudWorkspace.isPending`
+	// is still false in that window, so without this latch a quick second
+	// Cmd+Enter created a second workspace. Released in `finally` so a submit
+	// that failed validation or errored can be retried.
+	const inFlightRef = useRef(false);
+	const [isSubmitting, setIsSubmitting] = useState(false);
+
+	const submitWorkspaceInner = useCallback(async () => {
 		const hostId = draft.hostId ?? machineId;
 		const isCloud = hostId === CLOUD_HOST_ID;
 		// A cloud workspace clones the one cloud repo, so it has no use for a
@@ -81,8 +98,11 @@ export function useSubmitWorkspace(
 			return;
 		}
 
-		const { readyIds: attachmentIds, errors } =
-			await uploadAttachments.awaitUploads();
+		const {
+			readyIds: attachmentIds,
+			ready: readyAttachments,
+			errors,
+		} = await uploadAttachments.awaitUploads();
 		if (errors.length > 0) {
 			const first = errors[0];
 			toast.error(
@@ -105,9 +125,9 @@ export function useSubmitWorkspace(
 			const environments = await cloudTrpcClient.environment.list.query({
 				organizationId: activeOrganizationId,
 			});
+			const startable = startableCloudEnvironments(environments);
 			const environment =
-				environments.find((row) => row.id === draft.environmentId) ??
-				environments[0];
+				startable.find((row) => row.id === draft.environmentId) ?? startable[0];
 			if (!environment) {
 				toast.error(
 					t({
@@ -123,8 +143,9 @@ export function useSubmitWorkspace(
 				// Returns as soon as the row exists — the sandbox is still being
 				// provisioned behind it, which the workspace screen renders.
 				// Same rule as a local create: an agent launches only when there
-				// is something to say to it. Attachments stay behind — they are
-				// written to a host, and this workspace's host doesn't exist yet.
+				// is something to say to it. Attachments were uploaded to cloud
+				// storage rather than a host, so the ids here are `files.id`s the
+				// sandbox resolves and pulls once it is up.
 				const wantCloudAgent =
 					selectedAgent !== "none" &&
 					(!!draft.prompt.trim() ||
@@ -146,7 +167,16 @@ export function useSubmitWorkspace(
 					// 20,000-character cap.
 					prompt:
 						(cloudPrompt ?? draft.prompt).trim().slice(0, 20_000) || undefined,
-					branch: branchName ?? "main",
+					typedPrompt: draft.prompt.trim().slice(0, 20_000) || undefined,
+					taskIds: draft.linkedIssues
+						.flatMap((issue) =>
+							issue.source === "internal" && issue.taskId ? [issue.taskId] : [],
+						)
+						.slice(0, 10),
+					branch: draft.baseBranch ?? branchName ?? undefined,
+					...(attachmentIds.length > 0
+						? { attachmentFileIds: attachmentIds }
+						: {}),
 					...(wantCloudAgent
 						? {
 								agent: selectedAgent,
@@ -195,6 +225,8 @@ export function useSubmitWorkspace(
 		}
 
 		const isPrCheckout = draft.linkedPR !== null;
+		// A PR always needs its own worktree; otherwise the picker decides.
+		const isLocalCheckout = !isPrCheckout && draft.checkout === "local";
 
 		const linkedTaskId = draft.linkedIssues.find(
 			(issue) => issue.source === "internal" && issue.taskId,
@@ -216,18 +248,24 @@ export function useSubmitWorkspace(
 				})
 			: null;
 
-		const agents = wantAgent
-			? [
-					{
-						agent: selectedAgent,
-						prompt: finalPrompt ?? "",
-						attachmentIds: attachmentIds.length > 0 ? attachmentIds : undefined,
-						model: selectedModel ?? undefined,
-						effort: selectedEffort ?? undefined,
-						mode: selectedMode ?? undefined,
-					},
-				]
-			: undefined;
+		const openAsChat =
+			wantAgent &&
+			Boolean(acpHarnessForPreset(selectedPresetId)) &&
+			(await awaitAcpChatEnabled());
+		const agents =
+			wantAgent && !openAsChat
+				? [
+						{
+							agent: selectedAgent,
+							prompt: finalPrompt ?? "",
+							attachmentIds:
+								attachmentIds.length > 0 ? attachmentIds : undefined,
+							model: selectedModel ?? undefined,
+							effort: selectedEffort ?? undefined,
+							mode: selectedMode ?? undefined,
+						},
+					]
+				: undefined;
 
 		// PR path supplies a name (PR title) so the in-flight UI has
 		// something to show immediately. Branch path leaves both `name`
@@ -248,27 +286,54 @@ export function useSubmitWorkspace(
 					agents,
 					namingPrompt: !wantAgent && trimmedPrompt ? trimmedPrompt : undefined,
 				}
-			: {
-					id: workspaceId,
-					projectId: projectId as string,
-					name: isPrCheckout ? prName : (workspaceName ?? undefined),
-					branch: isPrCheckout ? undefined : (branchName ?? undefined),
-					skipBranchPrefix:
-						!isPrCheckout && branchName !== null && draft.branchNameFromProvider
-							? true
-							: undefined,
-					pr: isPrCheckout ? draft.linkedPR?.prNumber : undefined,
-					baseBranch: draft.baseBranch ?? undefined,
-					taskId: linkedTaskId,
-					agents,
-					namingPrompt:
-						!isPrCheckout && !wantAgent && trimmedPrompt
-							? trimmedPrompt
-							: undefined,
-				};
+			: isLocalCheckout
+				? {
+						id: workspaceId,
+						projectId: projectId as string,
+						checkout: "local" as const,
+						name: workspaceName ?? undefined,
+						taskId: linkedTaskId,
+						agents,
+						namingPrompt:
+							!wantAgent && trimmedPrompt ? trimmedPrompt : undefined,
+					}
+				: {
+						id: workspaceId,
+						projectId: projectId as string,
+						name: isPrCheckout ? prName : (workspaceName ?? undefined),
+						branch: isPrCheckout ? undefined : (branchName ?? undefined),
+						skipBranchPrefix:
+							!isPrCheckout &&
+							branchName !== null &&
+							draft.branchNameFromProvider
+								? true
+								: undefined,
+						pr: isPrCheckout ? draft.linkedPR?.prNumber : undefined,
+						baseBranch: draft.baseBranch ?? undefined,
+						taskId: linkedTaskId,
+						agents,
+						namingPrompt:
+							!isPrCheckout && !wantAgent && trimmedPrompt
+								? trimmedPrompt
+								: undefined,
+					};
 
 		if (trimmedPrompt) {
 			usePromptHistoryStore.getState().recordPrompt(trimmedPrompt);
+		}
+
+		if (openAsChat) {
+			queuePendingChatHandoff(
+				collections,
+				{ id: workspaceId, projectId },
+				{
+					agentId: selectedAgent,
+					prompt: finalPrompt ?? "",
+					attachments: readyAttachments,
+					modelId: selectedModel ?? undefined,
+					modeId: selectedMode ?? undefined,
+				},
+			);
 		}
 
 		closeAndResetDraft();
@@ -309,6 +374,9 @@ export function useSubmitWorkspace(
 		});
 	}, [
 		activeOrganizationId,
+		awaitAcpChatEnabled,
+		selectedPresetId,
+		collections,
 		closeAndResetDraft,
 		createCloudWorkspace,
 		draft,
@@ -328,9 +396,20 @@ export function useSubmitWorkspace(
 		utils,
 	]);
 
-	// Cloud creation is the one path the user waits on, now only for as long as
-	// it takes to record the workspace — the sandbox comes up behind the
-	// workspace screen. Returned so the submit control can carry its own
-	// pending state for that moment rather than looking inert.
-	return { submitWorkspace, isCreating: createCloudWorkspace.isPending };
+	const submitWorkspace = useCallback(async () => {
+		if (inFlightRef.current) return;
+		inFlightRef.current = true;
+		setIsSubmitting(true);
+		try {
+			await submitWorkspaceInner();
+		} finally {
+			inFlightRef.current = false;
+			setIsSubmitting(false);
+		}
+	}, [submitWorkspaceInner]);
+
+	// Spans the whole submit — pending uploads, the cloud environment lookup,
+	// and the create itself — so the submit control reads busy for exactly the
+	// window in which a second activation would be dropped.
+	return { submitWorkspace, isCreating: isSubmitting };
 }

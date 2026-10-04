@@ -4,8 +4,8 @@ import { useMemo } from "react";
 import { ScrollView, View } from "react-native";
 import { Button } from "@/components/ui/button";
 import { Text } from "@/components/ui/text";
-import { useHostsPresence } from "@/hooks/useHostsPresence";
-import { NO_HOSTS, useOrgHostsQuery } from "@/hooks/useOrgHosts";
+import { useOrgHosts } from "@/hooks/useOrgHosts";
+import { useReadableInset } from "@/hooks/useReadableInset";
 import { useTheme } from "@/hooks/useTheme";
 import { openUrl } from "@/lib/open-url";
 import { HostStatusDot } from "@/screens/(authenticated)/components/HostStatusDot";
@@ -14,25 +14,20 @@ import { ListRow } from "@/screens/(authenticated)/components/ListRow";
 export function HostsSettingsScreen() {
 	const { t } = useLingui();
 	const theme = useTheme();
-	const hostsQuery = useOrgHostsQuery();
-	const hosts = hostsQuery.data ?? NO_HOSTS;
-	const presence = useHostsPresence(hosts);
+	const { hosts, query: hostsQuery } = useOrgHosts();
 
 	const hostRows = useMemo(
-		() =>
-			hosts
-				.map((host) => ({
-					...host,
-					isOnline: presence?.get(host.machineId) ?? host.isOnline,
-				}))
-				.sort((a, b) => a.name.localeCompare(b.name)),
-		[hosts, presence],
+		() => [...hosts].sort((a, b) => a.name.localeCompare(b.name)),
+		[hosts],
 	);
 
+	// 24pt (px-6) on a phone; a centered column on iPad.
+	const readableInset = useReadableInset(24);
 	return (
 		<ScrollView
 			className="bg-background flex-1"
-			contentContainerClassName="px-6 pb-12"
+			contentContainerClassName="pb-12"
+			contentContainerStyle={{ paddingHorizontal: readableInset }}
 		>
 			{hostsQuery.isSuccess && hostRows.length === 0 ? (
 				// Same dead end as the home screen's: a device only reaches the

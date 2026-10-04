@@ -35,6 +35,7 @@ import { initAppState } from "./lib/app-state";
 import { requestAppleEventsAccess } from "./lib/apple-events-permission";
 import { isUpdateReadyToInstall, setupAutoUpdater } from "./lib/auto-updater";
 import { startBrowserBridge } from "./lib/browser/browser-bridge";
+import { browserManager } from "./lib/browser/browser-manager";
 import { downloadManager } from "./lib/browser/download-manager";
 import { installBundledCliShim } from "./lib/bundled-cli";
 import { initCrashReporter } from "./lib/crash-reporter";
@@ -47,14 +48,11 @@ import { resolveAppLocale } from "./lib/language";
 import { localDb } from "./lib/local-db";
 import { requestLocalNetworkAccess } from "./lib/local-network-permission";
 import { menuEmitter } from "./lib/menu-events";
-import {
-	initTanstackDbPersistence,
-	shutdownTanstackDbPersistence,
-} from "./lib/persistence/persistence";
 import { syncInstalledPluginMcpServers } from "./lib/plugin-installs";
 import { portForwardManager } from "./lib/port-forward";
 import { ensureProjectIconsDir, getProjectIconPath } from "./lib/project-icons";
 import { runQuitCleanup } from "./lib/quit-sequence";
+import { startResourceJournal } from "./lib/resource-metrics/resource-journal";
 import { initSentry } from "./lib/sentry";
 import {
 	prewarmTerminalRuntime,
@@ -184,6 +182,10 @@ async function processDeepLink(url: string): Promise<void> {
 	target?.webContents.send("deep-link-navigate", path);
 }
 
+browserManager.on("deep-link", (url: string) => {
+	void processDeepLink(url);
+});
+
 function findDeepLinkInArgv(argv: string[]): string | undefined {
 	return argv.find((arg) => arg.startsWith(`${PROTOCOL_SCHEME}://`));
 }
@@ -245,6 +247,10 @@ app.on("open-url", async (event, url) => {
 
 let isQuitting = false;
 let skipQuitConfirmation = false;
+// A second quit request while the confirmation is open would open a second
+// dialog on top of the first — the overlay close button on Linux makes that
+// easy to trigger.
+let quitConfirmationOpen = false;
 let forceFullCleanup = false;
 
 export function setSkipQuitConfirmation(): void {
@@ -286,12 +292,24 @@ function getConfirmOnQuitSetting(): boolean {
 	}
 }
 
+// macOS keeps running without windows (dock and tray reopen it); elsewhere a
+// windowless app is an invisible process nothing brings back.
+app.on("window-all-closed", () => {
+	if (process.platform === "darwin") return;
+	// The last window's close already asked; with no window left there is
+	// nothing a cancelled confirmation could keep.
+	skipQuitConfirmation = true;
+	app.quit();
+});
+
 app.on("before-quit", async (event) => {
 	if (isQuitting) return;
 
 	const isDev = process.env.NODE_ENV === "development";
 	if (!skipQuitConfirmation && !isDev && getConfirmOnQuitSetting()) {
 		event.preventDefault();
+		if (quitConfirmationOpen) return;
+		quitConfirmationOpen = true;
 
 		try {
 			const { response } = await dialog.showMessageBox({
@@ -310,12 +328,14 @@ app.on("before-quit", async (event) => {
 				),
 			});
 
+			quitConfirmationOpen = false;
 			if (response === 1) {
 				return;
 			}
 		} catch (error) {
 			console.error("[main] Quit confirmation dialog failed:", error);
 		}
+		quitConfirmationOpen = false;
 	}
 
 	isQuitting = true;
@@ -334,7 +354,6 @@ app.on("before-quit", async (event) => {
 		stopHostServices: () => getHostServiceCoordinator().stopAll(),
 		teardownTerminalHost,
 		disposeTerminalHostClient,
-		shutdownPersistence: shutdownTanstackDbPersistence,
 		disposeTray,
 		forceExit: (code) => app.exit(code),
 	});
@@ -501,7 +520,6 @@ if (!gotTheLock) {
 		setWorkspaceDockIcon();
 		initSentry();
 		await initAppState();
-		initTanstackDbPersistence();
 
 		sweepNetworkLogs();
 		sweepDevAppProfiles();
@@ -615,6 +633,7 @@ if (!gotTheLock) {
 		);
 		setupAutoUpdater();
 		initTray();
+		startResourceJournal();
 
 		const coldStartUrl = findDeepLinkInArgv(process.argv);
 		if (coldStartUrl) {

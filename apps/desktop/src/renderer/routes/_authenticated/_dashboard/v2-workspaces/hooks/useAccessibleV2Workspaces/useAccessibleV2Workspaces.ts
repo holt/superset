@@ -7,8 +7,8 @@ import { resolveProjectIconUrl } from "renderer/hooks/host-projects/resolveProje
 import { useHostProjects } from "renderer/hooks/host-projects/useHostProjects";
 import { deriveTerminalAgentStatus } from "renderer/hooks/host-service/useTerminalAgentStatuses";
 import { useHostWorkspacesSource } from "renderer/hooks/host-workspaces/useHostWorkspaces";
+import { useKnownHosts } from "renderer/hooks/known-hosts/useKnownHosts";
 import { useActiveOrganizationId } from "renderer/hooks/useActiveOrganizationId";
-import { useHostsPresence } from "renderer/hooks/useHostsPresence";
 import { useRelayUrl } from "renderer/hooks/useRelayUrl";
 import { authClient } from "renderer/lib/auth-client";
 import { cloudTrpc } from "renderer/lib/cloud-trpc";
@@ -73,7 +73,7 @@ export interface AccessibleV2Workspace {
 	id: string;
 	name: string;
 	branch: string;
-	type: "main" | "worktree" | "session";
+	type: "local" | "worktree" | "session";
 	createdAt: Date;
 	createdByUserId: string | null;
 	createdByName: string | null;
@@ -241,6 +241,11 @@ function useStableByWorkspaceId<T>(entries: [string, T][]): Map<string, T> {
 	);
 }
 
+export const V2_WORKSPACES_PULL_REQUEST_QUERY_KEY_PREFIX = [
+	"v2-workspaces",
+	"pull-requests",
+] as const;
+
 export function useAccessibleV2Workspaces(
 	options: UseAccessibleV2WorkspacesOptions = {},
 ): UseAccessibleV2WorkspacesResult {
@@ -288,22 +293,9 @@ export function useAccessibleV2Workspaces(
 	const { workspaces: hostWorkspaces, isReady } =
 		deviceFilter === undefined ? fanoutSource : scopedSource;
 
-	const { data: rawHostRows = [] } = cloudTrpc.v2Host.list.useQuery(undefined, {
-		refetchInterval: 30_000,
-	});
-	const presence = useHostsPresence(rawHostRows);
-	const hostRows = useMemo(
-		() =>
-			presence
-				? rawHostRows.map((host) => ({
-						...host,
-						isOnline: presence.get(host.machineId)?.online ?? host.isOnline,
-					}))
-				: rawHostRows,
-		[rawHostRows, presence],
-	);
+	const { hosts: hostRows } = useKnownHosts();
 
-	const { data: hostMemberRows = [] } = cloudTrpc.v2Host.listMembers.useQuery(
+	const { data: hostMemberRows = [] } = cloudTrpc.host.listMembers.useQuery(
 		undefined,
 		{},
 	);
@@ -382,7 +374,7 @@ export function useAccessibleV2Workspaces(
 			id: string;
 			name: string;
 			branch: string;
-			type: "main" | "worktree" | "session";
+			type: "local" | "worktree" | "session";
 			createdAt: Date;
 			createdByUserId: string | null;
 			createdByName: string | null;
@@ -535,8 +527,7 @@ export function useAccessibleV2Workspaces(
 			// URL or membership in the key cold-starts the cache on every
 			// port change / workspace add/remove.
 			queryKey: [
-				"v2-workspaces",
-				"pull-requests",
+				...V2_WORKSPACES_PULL_REQUEST_QUERY_KEY_PREFIX,
 				target.organizationId,
 				target.machineId,
 			] as const,
@@ -699,13 +690,9 @@ export function useAccessibleV2Workspaces(
 			if (deduped.has(row.id)) continue;
 			const hostType: V2WorkspaceHostType =
 				row.hostId === machineId ? "local-device" : "remote-device";
-			const isAutoVisibleMain =
-				row.type === "main" &&
-				row.hostId === machineId &&
-				row.sidebarProjectId != null;
 			const isInSidebar =
 				isSidebarWorkspaceVisible({ isHidden: row.sidebarIsHidden }) &&
-				(row.sidebarWorkspaceId != null || isAutoVisibleMain);
+				row.sidebarWorkspaceId != null;
 			const pr = prByWorkspaceId.get(row.id) ?? null;
 
 			deduped.set(row.id, {

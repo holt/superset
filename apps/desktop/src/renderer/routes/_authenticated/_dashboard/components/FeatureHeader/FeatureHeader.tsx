@@ -1,5 +1,6 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
+import { ButtonGroup } from "@superset/ui/button-group";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -8,7 +9,12 @@ import {
 } from "@superset/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@superset/ui/tooltip";
 import type { ReactNode } from "react";
-import { LuChevronDown, LuCircleHelp, LuPlus } from "react-icons/lu";
+import {
+	LuChevronDown,
+	LuCircleHelp,
+	LuPlus,
+	LuSparkles,
+} from "react-icons/lu";
 
 interface FeatureHeaderProps {
 	title: ReactNode;
@@ -16,7 +22,8 @@ interface FeatureHeaderProps {
 	onCreate: () => void;
 	isCreating: boolean;
 	showCreate?: boolean;
-	secondaryAction?: {
+	createDescription?: ReactNode;
+	primaryAction?: {
 		label: ReactNode;
 		onSelect: () => void;
 		disabled: boolean;
@@ -29,7 +36,8 @@ export function FeatureHeader({
 	onCreate,
 	isCreating,
 	showCreate = true,
-	secondaryAction,
+	createDescription,
+	primaryAction,
 }: FeatureHeaderProps) {
 	const { t } = useLingui();
 	return (
@@ -59,41 +67,52 @@ export function FeatureHeader({
 					</TooltipContent>
 				</Tooltip>
 			</div>
-			{showCreate && (
-				<div className="flex items-center">
-					<Button
-						size="sm"
-						disabled={isCreating}
-						onClick={onCreate}
-						className={secondaryAction ? "rounded-r-none" : undefined}
-					>
-						<LuPlus className="size-3.5" />
-						<Trans>Create with AI</Trans>
-					</Button>
-					{secondaryAction && (
+			{showCreate &&
+				(primaryAction ? (
+					<ButtonGroup>
+						<Button
+							size="sm"
+							disabled={primaryAction.disabled}
+							onClick={primaryAction.onSelect}
+						>
+							<LuPlus className="size-3.5" />
+							{primaryAction.label}
+						</Button>
 						<DropdownMenu>
 							<DropdownMenuTrigger asChild>
 								<Button
-									size="icon-sm"
-									className="rounded-l-none border-primary-foreground/15 border-l"
-									aria-label={t({ message: "More options" })}
+									size="sm"
+									className="px-2"
+									aria-label={t({ message: "More create options" })}
 								>
 									<LuChevronDown className="size-3.5" />
 								</Button>
 							</DropdownMenuTrigger>
-							<DropdownMenuContent align="end">
+							<DropdownMenuContent align="end" sideOffset={6} className="w-64">
 								<DropdownMenuItem
-									disabled={secondaryAction.disabled}
-									onSelect={secondaryAction.onSelect}
+									className="items-start gap-2.5 p-2.5"
+									disabled={isCreating}
+									onSelect={onCreate}
 								>
-									<LuPlus className="size-4" />
-									{secondaryAction.label}
+									<LuSparkles className="mt-0.5 size-4" />
+									<span className="flex min-w-0 flex-col gap-0.5">
+										<Trans>Create with AI</Trans>
+										{createDescription && (
+											<span className="text-xs text-muted-foreground">
+												{createDescription}
+											</span>
+										)}
+									</span>
 								</DropdownMenuItem>
 							</DropdownMenuContent>
 						</DropdownMenu>
-					)}
-				</div>
-			)}
+					</ButtonGroup>
+				) : (
+					<Button size="sm" disabled={isCreating} onClick={onCreate}>
+						<LuSparkles className="size-3.5" />
+						<Trans>Create with AI</Trans>
+					</Button>
+				))}
 		</div>
 	);
 }

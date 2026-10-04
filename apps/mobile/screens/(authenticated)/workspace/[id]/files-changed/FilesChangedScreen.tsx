@@ -26,6 +26,10 @@ import { errorCopy } from "@/lib/errors";
 import { getHostServiceClientByUrl } from "@/lib/host-service/client";
 import { posthog } from "@/lib/posthog";
 import {
+	anchorOf,
+	ToolbarAnchor,
+} from "@/screens/(authenticated)/components/ToolbarAnchor";
+import {
 	type ChangesetFile,
 	useWorkspaceChangeset,
 } from "../hooks/useWorkspaceChangeset";
@@ -161,6 +165,7 @@ export function FilesChangedScreen() {
 		(path: string) => {
 			const file = changeset.files.find((entry) => entry.path === path);
 			if (!file) return;
+			if (file.additions === null || file.deletions === null) return;
 			const estimate = (file.additions + file.deletions + 8) * DIFF_LINE_HEIGHT;
 			if (estimate <= ANIMATED_TOGGLE_MAX_PX) animateNextListUpdate();
 		},
@@ -313,6 +318,7 @@ export function FilesChangedScreen() {
 	}, [contentWidths.maxOffset, maxScrollX, scrollX]);
 
 	const panStartX = useRef(0);
+	const shareAnchorRef = useRef<View>(null);
 	const panResponder = useMemo(
 		() =>
 			PanResponder.create({
@@ -359,9 +365,10 @@ export function FilesChangedScreen() {
 	);
 
 	const onCommentMenu = useCallback(
-		(comment: DraftComment) => {
+		(comment: DraftComment, anchor: number | null) => {
 			ActionSheetIOS.showActionSheetWithOptions(
 				{
+					anchor: anchor ?? undefined,
 					options: [
 						t({ message: "Edit" }),
 						t({ message: "Delete" }),
@@ -632,14 +639,20 @@ export function FilesChangedScreen() {
 						<Text className="font-semibold text-[16px]">
 							<Trans>Files changed</Trans>
 						</Text>
-						<View className="flex-row gap-1.5">
-							<Text className="text-green-500 font-semibold text-[11.5px]">
-								+{formatNumber(changeset.additions)}
-							</Text>
-							<Text className="text-red-500 font-semibold text-[11.5px]">
-								−{formatNumber(changeset.deletions)}
-							</Text>
-						</View>
+						{(changeset.additions > 0 || changeset.deletions > 0) && (
+							<View className="flex-row gap-1.5">
+								{changeset.additions > 0 && (
+									<Text className="text-green-500 font-semibold text-[11.5px]">
+										+{formatNumber(changeset.additions)}
+									</Text>
+								)}
+								{changeset.deletions > 0 && (
+									<Text className="text-red-500 font-semibold text-[11.5px]">
+										−{formatNumber(changeset.deletions)}
+									</Text>
+								)}
+							</View>
+						)}
 					</View>
 				</Stack.Title>
 				<Stack.Toolbar placement="right">
@@ -652,7 +665,11 @@ export function FilesChangedScreen() {
 						<Stack.Toolbar.MenuAction
 							icon="square.and.arrow.up"
 							onPress={() => {
-								if (shareUrl) void Share.share({ url: shareUrl });
+								if (shareUrl)
+									void Share.share(
+										{ url: shareUrl },
+										{ anchor: anchorOf(shareAnchorRef) },
+									);
 							}}
 						>
 							{t({ message: "Share" })}
@@ -712,6 +729,7 @@ export function FilesChangedScreen() {
 					router.push(`/(authenticated)/workspace/${workspaceId}/jump-to-file`)
 				}
 			/>
+			<ToolbarAnchor ref={shareAnchorRef} />
 		</View>
 	);
 }

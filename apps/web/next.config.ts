@@ -41,6 +41,11 @@ const relayBackupHttpOrigin = process.env.RELAY_BACKUP_URL
 const relayBackupWsOrigin = relayBackupHttpOrigin
 	? relayBackupHttpOrigin.replace(/^http/, "ws")
 	: null;
+const realtimeWsOrigin = process.env.REALTIME_URL
+	? new URL(process.env.REALTIME_URL).origin.replace(/^http/, "ws")
+	: isProduction
+		? "wss://realtime.superset.sh"
+		: null;
 // Published pages are framed from their own origin, one subdomain per page.
 // An unset GitHub Actions var arrives as an empty string, which `??`
 // does not catch — and `new URL("")` throws before Next even loads.
@@ -62,11 +67,13 @@ const contentSecurityPolicy = [
 		relayHttpOrigin,
 		relayBackupWsOrigin,
 		relayBackupHttpOrigin,
+		realtimeWsOrigin,
 		"https://*.ingest.sentry.io",
 		"https://*.sentry.io",
 		"https://us.i.posthog.com",
 		"https://us-assets.i.posthog.com",
 		"https://us.posthog.com",
+		"https://cloudflareinsights.com",
 		!isProduction && "ws:",
 		!isProduction && "wss:",
 	]
@@ -82,6 +89,7 @@ const contentSecurityPolicy = [
 		// wasm-unsafe-eval: WebAssembly.instantiate only — NOT eval()/Function.
 		// Without it Chrome blocks wasm under script-src (WEB-2K, /oauth/consent).
 		"script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
+		"https://static.cloudflareinsights.com",
 		!isProduction && "'unsafe-eval'",
 	]
 		.filter(Boolean)

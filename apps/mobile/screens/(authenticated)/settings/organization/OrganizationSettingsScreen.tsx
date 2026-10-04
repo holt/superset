@@ -1,8 +1,12 @@
+import Ionicons from "@expo/vector-icons/Ionicons";
 import { Trans } from "@lingui/react/macro";
+import { useRouter } from "expo-router";
 import { useMemo } from "react";
 import { ScrollView, View } from "react-native";
 import { Text } from "@/components/ui/text";
+import { useReadableInset } from "@/hooks/useReadableInset";
 import { useTheme } from "@/hooks/useTheme";
+import { useSession } from "@/lib/auth/client";
 import { ListRow } from "@/screens/(authenticated)/components/ListRow";
 import { OrganizationAvatar } from "@/screens/(authenticated)/components/OrganizationAvatar";
 import { useOrganizations } from "@/screens/(authenticated)/hooks/useOrganizations";
@@ -11,7 +15,14 @@ import { UserAvatar } from "../components/UserAvatar";
 
 export function OrganizationSettingsScreen() {
 	const theme = useTheme();
-	const { activeOrganization } = useOrganizations();
+	const router = useRouter();
+	const { refetch } = useSession();
+	const {
+		organizations,
+		activeOrganization,
+		activeOrganizationId,
+		switchOrganization,
+	} = useOrganizations();
 	const members = useOrgMembers();
 
 	const memberRows = useMemo(
@@ -19,10 +30,13 @@ export function OrganizationSettingsScreen() {
 		[members],
 	);
 
+	// 24pt (px-6) on a phone; a centered column on iPad.
+	const readableInset = useReadableInset(24);
 	return (
 		<ScrollView
 			className="bg-background flex-1"
-			contentContainerClassName="px-6 pb-12"
+			contentContainerClassName="pb-12"
+			contentContainerStyle={{ paddingHorizontal: readableInset }}
 		>
 			<View className="items-center gap-2 py-8">
 				<OrganizationAvatar
@@ -44,6 +58,40 @@ export function OrganizationSettingsScreen() {
 			</View>
 			<Text
 				className="mb-1 text-sm font-semibold"
+				style={{ color: theme.mutedForeground }}
+			>
+				<Trans>Switch organization</Trans>
+			</Text>
+			{organizations.map((organization, index) => (
+				<ListRow
+					key={organization.id}
+					icon={
+						<OrganizationAvatar
+							name={organization.name}
+							logo={organization.logo}
+							size={32}
+						/>
+					}
+					label={organization.name}
+					subtitle={organization.slug ?? undefined}
+					trailing={
+						organization.id === activeOrganizationId ? (
+							<Ionicons
+								name="checkmark-circle"
+								size={18}
+								color={theme.primary}
+							/>
+						) : null
+					}
+					onPress={() => {
+						router.dismissAll();
+						void switchOrganization(organization.id).then(() => refetch());
+					}}
+					isLast={index === organizations.length - 1}
+				/>
+			))}
+			<Text
+				className="mb-1 mt-8 text-sm font-semibold"
 				style={{ color: theme.mutedForeground }}
 			>
 				<Trans>Members</Trans>

@@ -7,14 +7,15 @@ import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { TRPCClientError } from "@trpc/client";
 import { useMemo, useState } from "react";
+import { GATED_FEATURES, usePaywall } from "renderer/components/Paywall";
 import { apiTrpcClient } from "renderer/lib/api-trpc-client";
 import { authClient } from "renderer/lib/auth-client";
 import { cloudTrpc } from "renderer/lib/cloud-trpc";
+import { useCopyShareLink } from "renderer/routes/_authenticated/_dashboard/hooks/useCopyShareLink";
+import { useIsOrganizationOwner } from "renderer/routes/_authenticated/hooks/useIsOrganizationOwner";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import { HostOfflineRunDialog } from "../components/HostOfflineRunDialog";
-import { useCopyAutomationLink } from "../hooks/useCopyAutomationLink";
-import { isHostOfflineError } from "../utils/hostOfflineError";
-import { isStaleAgentError, STALE_AGENT_HELP } from "../utils/staleAgentError";
+import { dispatchErrorCode, runErrorHelp } from "../utils/runErrorHelp";
 import { AutomationBody } from "./components/AutomationBody";
 import { AutomationBreadcrumbBar } from "./components/AutomationBreadcrumbBar";
 import { AutomationDetailHeader } from "./components/AutomationDetailHeader";
@@ -49,7 +50,7 @@ function organizationFromError(params: unknown): { id: string | null } | null {
 	return { id: typeof organizationId === "string" ? organizationId : null };
 }
 
-const RECENT_RUNS_LIMIT = 10;
+const RUNS_PAGE_SIZE = 20;
 
 function AutomationDetailPage() {
 	const { t } = useLingui();
@@ -57,29 +58,39 @@ function AutomationDetailPage() {
 	const { history } = Route.useSearch();
 	const navigate = useNavigate();
 	const { data: session } = authClient.useSession();
+	const isOrgOwner = useIsOrganizationOwner();
 	const currentUserId = session?.user?.id;
 	const [historyOpen, setHistoryOpen] = useState(history ?? false);
 	const [hostOfflineOpen, setHostOfflineOpen] = useState(false);
-	const copyAutomationLink = useCopyAutomationLink();
+	const copyShareLink = useCopyShareLink();
 	const { switchOrganization } = useCollections();
 
 	// The prompt body rides its own procedure — `get` omits it.
 	const automationQuery = cloudTrpc.automation.get.useQuery(
 		{ id: automationId },
-		{ refetchInterval: 15_000, staleTime: 30_000 },
+		{ refetchInterval: 60_000, staleTime: 30_000 },
 	);
 	const promptQuery = cloudTrpc.automation.getPrompt.useQuery(
 		{ id: automationId },
-		{ refetchInterval: 15_000, staleTime: 30_000 },
+		{ refetchInterval: 60_000, staleTime: 30_000 },
 	);
 	const automation = useMemo(() => {
 		if (!automationQuery.data || !promptQuery.data) return undefined;
 		return { ...automationQuery.data, prompt: promptQuery.data.prompt };
 	}, [automationQuery.data, promptQuery.data]);
 
-	const { data: recentRuns = [] } = cloudTrpc.automation.listRuns.useQuery(
-		{ automationId, limit: RECENT_RUNS_LIMIT },
-		{ refetchInterval: 5_000, staleTime: 30_000 },
+	// The same list All runs renders, filtered to this automation, so a run
+	// reads identically on both screens and older history stays reachable.
+	const runsQuery = cloudTrpc.automation.listOrgRuns.useInfiniteQuery(
+		{ automationId, limit: RUNS_PAGE_SIZE, scope: "all", status: "all" },
+		{
+			getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+			staleTime: 30_000,
+		},
+	);
+	const recentRuns = useMemo(
+		() => runsQuery.data?.pages.flatMap((page) => page.runs) ?? [],
+		[runsQuery.data],
 	);
 
 	const ownerUserId = automationQuery.data?.ownerUserId;
@@ -93,6 +104,9 @@ function AutomationDetailPage() {
 	const ownerName = owner?.name ?? owner?.email ?? null;
 
 	const utils = cloudTrpc.useUtils();
+	// Running and resuming are Pro (the server refuses them too); pausing,
+	// editing, and deleting stay open to a downgraded org.
+	const { gateFeature } = usePaywall();
 
 	const setEnabledMutation = useMutation({
 		mutationFn: (enabled: boolean) =>
@@ -122,17 +136,18 @@ function AutomationDetailPage() {
 				}),
 			),
 		onError: (error) => {
-			const message = error instanceof Error ? error.message : null;
-			if (isHostOfflineError(message)) {
+			const code = dispatchErrorCode(error);
+			if (code === "host_offline") {
 				setHostOfflineOpen(true);
 				return;
 			}
-			if (isStaleAgentError(message)) {
-				toast.error(i18n._(STALE_AGENT_HELP));
+			const help = runErrorHelp(code);
+			if (help) {
+				toast.error(i18n._(help));
 				return;
 			}
 			toast.error(
-				message ??
+				(error instanceof Error ? error.message : null) ??
 					t({
 						message: "Failed to trigger run",
 					}),
@@ -201,7 +216,7 @@ function AutomationDetailPage() {
 			<div className="flex flex-1 flex-col overflow-hidden">
 				<AutomationDetailHeader
 					name={automation.name}
-					onCopyLink={() => copyAutomationLink(automation.id)}
+					onCopyLink={() => copyShareLink(`automations/${automation.id}`)}
 					onDelete={() => {
 						alert({
 							title: t({
@@ -243,19 +258,35 @@ function AutomationDetailPage() {
 							],
 						});
 					}}
-					onRunNow={() => runNowMutation.mutate()}
+					onRunNow={() =>
+						gateFeature(GATED_FEATURES.AUTOMATIONS, () =>
+							runNowMutation.mutate(),
+						)
+					}
 					onOpenHistory={() => setHistoryOpen(true)}
 					deleteDisabled={deleteMutation.isPending}
 					runNowDisabled={runNowMutation.isPending}
 					readOnly={readOnly}
+					canDelete={!readOnly || isOrgOwner}
 				/>
 
 				<AutomationBody
 					key={automation.id}
 					automation={automation}
 					recentRuns={recentRuns}
+					hasMoreRuns={runsQuery.hasNextPage ?? false}
+					isLoadingMoreRuns={runsQuery.isFetchingNextPage}
+					onLoadMoreRuns={() => void runsQuery.fetchNextPage()}
 					ownerName={ownerName}
-					onToggleEnabled={(enabled) => setEnabledMutation.mutate(enabled)}
+					onToggleEnabled={(enabled) => {
+						if (!enabled) {
+							setEnabledMutation.mutate(false);
+							return;
+						}
+						gateFeature(GATED_FEATURES.AUTOMATIONS, () =>
+							setEnabledMutation.mutate(true),
+						);
+					}}
 					toggleDisabled={setEnabledMutation.isPending}
 					readOnly={readOnly}
 				/>

@@ -1,9 +1,11 @@
 import * as Sentry from "@sentry/cloudflare";
 import { PAGE_COMMENTS_RUNTIME_SOURCE } from "@superset/shared/page-comments-runtime";
+import { PAGE_STORAGE_RUNTIME_SOURCE } from "@superset/shared/page-storage-runtime";
 import {
 	FILE_CONTENT_SECURITY_POLICY,
 	fileOriginalKey,
 	fileResponsePolicy,
+	injectHeadScriptTag,
 	injectScriptTag,
 	injectStyleTag,
 	PAGE_THEME_CSS,
@@ -15,7 +17,9 @@ import {
 	pageManifestKey,
 	pageThumbnailKey,
 	parsePageManifest,
+	publiclyReadable,
 	RUNTIME_SCRIPT_PATH,
+	STORAGE_SCRIPT_PATH,
 	servedVersionOf,
 	THUMBNAIL_FILENAME,
 	TICKET_QUERY_PARAM,
@@ -29,7 +33,7 @@ type AppContext = { Bindings: UsercontentEnv };
 
 const app = new Hono<AppContext>();
 
-const IMMUTABLE = "public, max-age=31536000, immutable";
+const PUBLIC_REVOCABLE = "public, max-age=300";
 
 /**
  * How long a reader may keep what a ticket fetched: never past the ticket
@@ -87,7 +91,7 @@ function ifNoneMatchSatisfied(
 
 /** A deploy that moves either has to miss the cache, not serve stale styling. */
 const RENDER_REVISION = revisionOf(
-	`${RUNTIME_SCRIPT_PATH}\u0000${PAGE_THEME_CSS}`,
+	`${RUNTIME_SCRIPT_PATH}\u0000${STORAGE_SCRIPT_PATH}\u0000${PAGE_THEME_CSS}`,
 );
 
 function baseHost(c: Context<AppContext>): string {
@@ -130,15 +134,17 @@ function requestedVersion(c: Context<AppContext>): number | null | undefined {
 }
 
 /**
- * A public page is open. Anything narrower needs the ticket the API minted
- * for it — for this page, and if the ticket names a version, for this one.
+ * A public page is open at the version its link resolves to. Anything
+ * narrower — including the other versions of that same public page — needs
+ * the ticket the API minted for it, for this page, and if the ticket names a
+ * version, for this one.
  */
 async function authorized(
 	c: Context<AppContext>,
 	manifest: PageManifest,
 	version: number,
 ): Promise<PageTicketClaims | "public" | null> {
-	if (manifest.visibility === "everyone") return "public";
+	if (publiclyReadable(manifest, version)) return "public";
 	const ticket = requestTicket(c);
 	if (!ticket) return null;
 	const claims = await verifyPageTicket(
@@ -178,21 +184,22 @@ async function servePage(c: Context<AppContext>): Promise<Response> {
 	const auth = await authorized(c, manifest, version);
 	if (!auth) return signInRedirect(c, manifest.slug);
 
-	// A pinned version is an immutable snapshot, so it caches like the assets
-	// beside it. The served alias moves when a new version is published, so it
-	// has to revalidate — the ETag is what makes that cost a set of headers
-	// rather than the whole document again.
+	// A pinned ticketed version is an immutable snapshot, so it caches like the
+	// assets beside it. The served alias moves when a new version is published,
+	// so it has to revalidate — the ETag is what makes that cost a set of
+	// headers rather than the whole document again.
 	const pinned = requested !== null;
 	const cacheControl =
 		auth === "public"
 			? pinned
-				? IMMUTABLE
+				? PUBLIC_REVOCABLE
 				: "no-cache"
 			: pinned
 				? `private, max-age=${ticketSeconds(auth)}, immutable`
 				: "private, no-cache";
 	const policy = pageContentSecurityPolicy(
 		c.env.FRAME_ANCESTORS.split(/\s+/).filter(Boolean),
+		new URL(c.env.REALTIME_URL).origin,
 	);
 	// The policy is in the tag because a 304 has no other way to refresh it.
 	const etag = `W/"${version}.${revisionOf(policy)}"`;
@@ -243,9 +250,12 @@ async function servePage(c: Context<AppContext>): Promise<Response> {
 		return new Response(object.body, { headers: headersFor(contentType) });
 	}
 
-	const html = injectStyleTag(
-		injectScriptTag(await object.text(), RUNTIME_SCRIPT_PATH),
-		PAGE_THEME_CSS,
+	const html = injectHeadScriptTag(
+		injectStyleTag(
+			injectScriptTag(await object.text(), RUNTIME_SCRIPT_PATH),
+			PAGE_THEME_CSS,
+		),
+		STORAGE_SCRIPT_PATH,
 	);
 	c.executionCtx.waitUntil(
 		caches.default
@@ -286,7 +296,7 @@ async function serveThumbnail(c: Context<AppContext>): Promise<Response> {
 			"Superset-Storage-Key": key,
 			"X-Content-Type-Options": "nosniff",
 			"Cache-Control":
-				remaining === null ? IMMUTABLE : `private, max-age=${remaining}`,
+				remaining === null ? PUBLIC_REVOCABLE : `private, max-age=${remaining}`,
 		},
 	});
 }
@@ -431,11 +441,11 @@ async function serveAsset(c: Context<AppContext>): Promise<Response> {
 	const auth = await authorized(c, manifest, version);
 	if (!auth) return signInRedirect(c, manifest.slug);
 
-	// Assets cache like the document's thumbnail: public versions immutably,
+	// Assets cache like the document's thumbnail: public versions briefly,
 	// ticketed ones only until the ticket that fetched them expires.
 	const cacheControl =
 		auth === "public"
-			? IMMUTABLE
+			? PUBLIC_REVOCABLE
 			: `private, max-age=${ticketSeconds(auth)}, immutable`;
 	const isHtml = asset.contentType.startsWith("text/html");
 	// Everything that is not the page's own document gets a policy of its own:
@@ -464,6 +474,7 @@ async function serveAsset(c: Context<AppContext>): Promise<Response> {
 			"Content-Security-Policy",
 			pageContentSecurityPolicy(
 				c.env.FRAME_ANCESTORS.split(/\s+/).filter(Boolean),
+				new URL(c.env.REALTIME_URL).origin,
 			),
 		);
 		headers.set("Origin-Agent-Cluster", "?1");
@@ -527,11 +538,17 @@ app.use("*", async (c, next) => {
 	return c.redirect(c.env.APP_URL, 302);
 });
 
+const SCRIPT_HEADERS = {
+	"Content-Type": "text/javascript; charset=utf-8",
+	"Cache-Control": "public, max-age=300",
+} as const;
+
 app.get(RUNTIME_SCRIPT_PATH, (c) =>
-	c.body(PAGE_COMMENTS_RUNTIME_SOURCE, 200, {
-		"Content-Type": "text/javascript; charset=utf-8",
-		"Cache-Control": "public, max-age=300",
-	}),
+	c.body(PAGE_COMMENTS_RUNTIME_SOURCE, 200, SCRIPT_HEADERS),
+);
+
+app.get(STORAGE_SCRIPT_PATH, (c) =>
+	c.body(PAGE_STORAGE_RUNTIME_SOURCE, 200, SCRIPT_HEADERS),
 );
 
 // Relative references resolve against the directory the document was

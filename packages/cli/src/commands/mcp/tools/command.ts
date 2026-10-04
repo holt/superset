@@ -1,13 +1,18 @@
-import { positional, string, table } from "@superset/cli-framework";
+import { string, table } from "@superset/cli-framework";
 import { command } from "../../../lib/command";
-import { resolveConnectionId } from "../../../lib/plugins/connection-ref";
+import { resolvePluginName } from "../../../lib/plugins/connection-ref";
+import { connectPluginMcp } from "../../../lib/plugins/mcp-client";
 
 export default command({
 	description: "List the tools a connected plugin exposes",
-	args: [positional("plugin").desc("Plugin name, when it has one connection")],
+	args: [],
 	options: {
-		connection: string().desc("Connection id from `superset plugins list`"),
-		pluginId: string().desc("Deprecated alias for --connection"),
+		plugin: string().desc("Plugin name from `superset plugins list`"),
+		account: string().desc(
+			"Connection id, when the plugin's connector has more than one account",
+		),
+		connection: string().desc("Deprecated alias for --plugin"),
+		pluginId: string().desc("Deprecated alias for --plugin"),
 	},
 	display: (data) =>
 		table(
@@ -16,25 +21,30 @@ export default command({
 			["PLUGIN", "TOOL", "DESCRIPTION"],
 			[16, 30, 70],
 		),
-	run: async ({ ctx, args, options }) => {
-		const connectionId = await resolveConnectionId(ctx.api, {
-			connection: (options.connection ?? options.pluginId) as
-				| string
-				| undefined,
-			plugin: args.plugin as string | undefined,
+	run: async ({ ctx, options }) => {
+		const pluginName = resolvePluginName({
+			plugin: options.plugin as string | undefined,
+			connection: options.connection as string | undefined,
+			pluginId: options.pluginId as string | undefined,
 		});
 
-		const { plugin, tools } = await ctx.api.plugins.tools.list.query({
-			connectionId,
-		});
-
-		return {
-			data: tools.map((tool) => ({
-				plugin,
-				tool: tool.name,
-				description: tool.description ?? "",
-			})),
-			message: `${tools.length} tool${tools.length === 1 ? "" : "s"} on ${plugin}.`,
-		};
+		const { client, ref } = await connectPluginMcp(
+			pluginName,
+			ctx.bearer,
+			options.account as string | undefined,
+		);
+		try {
+			const { tools } = await client.listTools();
+			return {
+				data: tools.map((tool) => ({
+					plugin: ref.plugin,
+					tool: tool.name,
+					description: tool.description ?? "",
+				})),
+				message: `${tools.length} tool${tools.length === 1 ? "" : "s"} on ${ref.plugin}.`,
+			};
+		} finally {
+			await client.close();
+		}
 	},
 });

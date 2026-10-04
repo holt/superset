@@ -1,27 +1,72 @@
 import { Trans, useLingui } from "@lingui/react/macro";
 import { Button } from "@superset/ui/button";
-import { Switch } from "@superset/ui/switch";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@superset/ui/dropdown-menu";
 import { useNavigate } from "@tanstack/react-router";
-import { LuArrowLeft, LuArrowUp, LuExternalLink } from "react-icons/lu";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+	LuArrowLeft,
+	LuArrowUp,
+	LuEllipsis,
+	LuExternalLink,
+	LuPlus,
+	LuPower,
+	LuSparkles,
+	LuTrash2,
+} from "react-icons/lu";
+import {
+	ConnectConnectorDialog,
+	ConnectorRow,
+} from "renderer/components/ConnectorSection";
+import { useOpenNewWorkspace } from "renderer/hooks/useOpenNewWorkspace";
 import { PluginIcon } from "renderer/routes/_authenticated/_dashboard/plugins/components/PluginIcon";
 import { SkillIcon } from "renderer/routes/_authenticated/_dashboard/plugins/components/SkillIcon";
 import type { CatalogPlugin } from "renderer/routes/_authenticated/_dashboard/plugins/hooks/usePluginCatalog";
 import { usePluginMutations } from "renderer/routes/_authenticated/_dashboard/plugins/hooks/usePluginMutations";
+import { useNewWorkspaceDraftStore } from "renderer/stores/new-workspace-draft";
+import { ConnectedAccounts } from "./components/ConnectedAccounts";
 import { InfoRow } from "./components/InfoRow";
-import { PluginConnections } from "./components/PluginConnections";
 import { SectionHeader } from "./components/SectionHeader";
-import { useAuthMethodLabel } from "./hooks/useAuthMethodLabel";
 
 export function PluginDetail({ plugin }: { plugin: CatalogPlugin }) {
 	const { t } = useLingui();
-	const authMethodLabel = useAuthMethodLabel();
 	const navigate = useNavigate();
-	const { add, uninstall, setEnabled, update, isBusy } = usePluginMutations();
+	const { install, uninstall, setEnabled, update, isBusy } =
+		usePluginMutations();
+	const openNewWorkspace = useOpenNewWorkspace();
+
+	const [isConnectOpen, setIsConnectOpen] = useState(false);
+
+	// Seeded before the navigation, not after: the draft store is only reset on
+	// close, so the create surface mounts with this already in the composer.
+	const tryNow = useCallback(() => {
+		useNewWorkspaceDraftStore.getState().updateDraft({
+			prompt: t({
+				message: `Use the ${plugin.interface.displayName} plugin to `,
+			}),
+		});
+		openNewWorkspace();
+	}, [openNewWorkspace, plugin.interface.displayName, t]);
+
+	const wasInstalled = useRef(plugin.installed);
+	const needsConnection = Boolean(
+		plugin.connector && plugin.connections.length === 0,
+	);
+
+	useEffect(() => {
+		if (plugin.installed && !wasInstalled.current && needsConnection)
+			setIsConnectOpen(true);
+		wasInstalled.current = plugin.installed;
+	}, [plugin.installed, needsConnection]);
 
 	const skills = plugin.pluginSkills ?? [];
 
 	return (
-		<div className="mx-auto w-full max-w-3xl px-6 pb-16">
+		<div className="mx-auto w-full max-w-3xl px-6 pt-4 pb-16">
 			<Button
 				variant="ghost"
 				size="sm"
@@ -47,41 +92,103 @@ export function PluginDetail({ plugin }: { plugin: CatalogPlugin }) {
 						</p>
 					</div>
 
-					<div className="flex shrink-0 items-center gap-3">
-						{plugin.updateAvailable && (
+					<div className="flex shrink-0 items-center gap-2">
+						{plugin.installed && (
+							<DropdownMenu>
+								<DropdownMenuTrigger asChild>
+									<Button
+										variant="ghost"
+										size="icon"
+										className="size-8 text-muted-foreground"
+										aria-label={t({
+											message: `More ${plugin.interface.displayName} actions`,
+										})}
+									>
+										<LuEllipsis className="size-4" />
+									</Button>
+								</DropdownMenuTrigger>
+								<DropdownMenuContent align="end">
+									<DropdownMenuItem
+										disabled={isBusy}
+										onSelect={() => setEnabled(plugin.name, !plugin.enabled)}
+									>
+										<LuPower className="size-3.5 shrink-0 text-current" />
+										{plugin.enabled ? (
+											<Trans>Disable</Trans>
+										) : (
+											<Trans>Enable</Trans>
+										)}
+									</DropdownMenuItem>
+									{plugin.updateAvailable && (
+										<DropdownMenuItem
+											disabled={isBusy}
+											onSelect={() => void update(plugin.name)}
+										>
+											<LuArrowUp className="size-3.5 shrink-0 text-current" />
+											<Trans>Update</Trans>
+										</DropdownMenuItem>
+									)}
+									<DropdownMenuItem
+										variant="destructive"
+										disabled={isBusy}
+										onSelect={() => uninstall(plugin.name)}
+									>
+										<LuTrash2 className="size-3.5 shrink-0 text-current" />
+										<Trans>Remove</Trans>
+									</DropdownMenuItem>
+								</DropdownMenuContent>
+							</DropdownMenu>
+						)}
+
+						{!plugin.installed && (
 							<Button
 								size="sm"
-								variant="outline"
 								disabled={isBusy}
-								onClick={() => void update(plugin.name)}
+								onClick={() => void install(plugin.name)}
 							>
-								<LuArrowUp className="size-4" />
-								<Trans>Update</Trans>
+								<LuPlus className="size-4" />
+								<Trans>Install plugin</Trans>
 							</Button>
 						)}
 						{plugin.installed && (
-							<Switch
-								checked={plugin.enabled}
-								disabled={isBusy}
-								aria-label={t({
-									message: `${plugin.interface.displayName} enabled`,
-								})}
-								onCheckedChange={(checked) => setEnabled(plugin.name, checked)}
-							/>
+							<Button size="sm" onClick={tryNow}>
+								<LuSparkles className="size-4" />
+								<Trans>Try now</Trans>
+							</Button>
 						)}
 					</div>
 				</div>
 			</div>
 
-			<PluginConnections
-				pluginName={plugin.name}
-				displayName={plugin.interface.displayName}
-				auth={plugin.auth}
-				installed={plugin.installed}
-				onAdd={() => add(plugin.name)}
-				onRemove={() => uninstall(plugin.name)}
-				isBusy={isBusy}
-			/>
+			{plugin.connector && (
+				<>
+					<section className="mt-10">
+						<SectionHeader label={<Trans>Apps</Trans>} count={1} />
+						<div className="divide-y divide-border/40">
+							<ConnectorRow
+								slug={plugin.connector}
+								description={plugin.description}
+								icon={
+									<PluginIcon pluginName={plugin.name} className="size-7" />
+								}
+								canConnect={plugin.installed}
+								onConnect={() => setIsConnectOpen(true)}
+							/>
+						</div>
+					</section>
+
+					<section className="mt-10">
+						<SectionHeader label={<Trans>Connected accounts</Trans>} />
+						<div className="pt-4">
+							<ConnectedAccounts
+								slug={plugin.connector}
+								canConnect={plugin.installed}
+								onConnect={() => setIsConnectOpen(true)}
+							/>
+						</div>
+					</section>
+				</>
+			)}
 
 			{skills.length > 0 && (
 				<section className="mt-10">
@@ -113,11 +220,9 @@ export function PluginDetail({ plugin }: { plugin: CatalogPlugin }) {
 					<InfoRow label={<Trans>Category</Trans>}>
 						{plugin.interface.category}
 					</InfoRow>
-					{plugin.auth?.length ? (
-						<InfoRow label={<Trans>Authentication</Trans>}>
-							{plugin.auth
-								.map((method) => authMethodLabel(method.type))
-								.join(", ")}
+					{plugin.connector ? (
+						<InfoRow label={<Trans>Connector</Trans>}>
+							{plugin.connector}
 						</InfoRow>
 					) : null}
 					<InfoRow label={<Trans>Version</Trans>}>
@@ -149,6 +254,13 @@ export function PluginDetail({ plugin }: { plugin: CatalogPlugin }) {
 					)}
 				</div>
 			</section>
+
+			<ConnectConnectorDialog
+				slug={isConnectOpen ? plugin.connector : null}
+				icon={<PluginIcon pluginName={plugin.name} className="size-12" />}
+				author={plugin.author}
+				onOpenChange={(open) => !open && setIsConnectOpen(false)}
+			/>
 		</div>
 	);
 }

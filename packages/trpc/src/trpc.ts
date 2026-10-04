@@ -7,9 +7,13 @@ import { and, eq } from "drizzle-orm";
 import superjson from "superjson";
 import { formatError, userError } from "./i18n-error";
 import { posthog } from "./lib/analytics";
+import {
+	SANDBOX_ALLOWED_PROCEDURES,
+	type SandboxCaller,
+} from "./lib/sandbox/api-credential";
 
-export type { I18nErrorCause } from "./i18n-error";
-export { isI18nErrorCause, userError } from "./i18n-error";
+export type { I18nErrorCause, RequiredPlan } from "./i18n-error";
+export { isI18nErrorCause, planRequiredError, userError } from "./i18n-error";
 
 export interface ApiClientInfo {
 	product: "desktop" | "mobile" | "cli" | "sdk";
@@ -54,16 +58,24 @@ export type TRPCContext = {
 	headers: Headers;
 	client: ApiClientInfo | null;
 	agentCaller: AgentCaller | null;
+	/**
+	 * Set when a cloud workspace is acting for itself, with the credential the
+	 * firewall adds on its way out. It carries the creator's identity, so the
+	 * procedures it may reach are an allowlist, not everything they can do.
+	 */
+	sandboxCaller: SandboxCaller | null;
 };
 
 export const createTRPCContext = (
-	opts: Omit<TRPCContext, "client" | "agentCaller"> & {
+	opts: Omit<TRPCContext, "client" | "agentCaller" | "sandboxCaller"> & {
 		agentCaller?: AgentCaller | null;
+		sandboxCaller?: SandboxCaller | null;
 	},
 ): TRPCContext => ({
 	...opts,
 	client: parseClientHeader(opts.headers),
 	agentCaller: opts.agentCaller ?? null,
+	sandboxCaller: opts.sandboxCaller ?? null,
 });
 
 const t = initTRPC.context<TRPCContext>().create({
@@ -71,6 +83,23 @@ const t = initTRPC.context<TRPCContext>().create({
 	errorFormatter({ shape, error }) {
 		return formatError({ shape, error });
 	},
+});
+
+/**
+ * A box may only reach what `superset` inside it needs. Everything else is a
+ * person's call, made from a client they signed into — the credential is
+ * unstealable, but every process in the box can use it.
+ */
+const sandboxScope = t.middleware(async ({ ctx, path, next }) => {
+	if (ctx.sandboxCaller && !SANDBOX_ALLOWED_PROCEDURES.has(path)) {
+		throw userError({
+			code: "FORBIDDEN",
+			message: `A cloud workspace cannot call ${path}. Run this from a client you are signed into.`,
+			i18nKey: "serverError.common.cloudWorkspaceCannotCallThis",
+			params: { path },
+		});
+	}
+	return next();
 });
 
 export const createTRPCRouter = t.router;
@@ -117,6 +146,7 @@ const PENDING_DELETION_ALLOWED_PROCEDURES = new Set([
 ]);
 
 export const protectedProcedure = t.procedure
+	.use(sandboxScope)
 	.use(clientTelemetry)
 	.use(async ({ ctx, next }) => {
 		if (!ctx.session) {
@@ -145,6 +175,7 @@ export const protectedProcedure = t.procedure
 	.use(async ({ ctx, next }) => {
 		const sessionOrgId = ctx.session.session.activeOrganizationId ?? null;
 		const headerOrgId = ctx.headers.get(ORGANIZATION_HEADER)?.trim() || null;
+		assertInBoxOrganization(ctx.sandboxCaller, headerOrgId);
 
 		let activeOrganizationId = sessionOrgId;
 		if (headerOrgId && headerOrgId !== sessionOrgId) {
@@ -154,17 +185,50 @@ export const protectedProcedure = t.procedure
 					eq(members.organizationId, headerOrgId),
 				),
 			});
-			if (!membership) {
-				throw new TRPCError({
-					code: "FORBIDDEN",
-					message: `Not a member of organization ${headerOrgId}`,
-				});
-			}
+			if (!membership) throw notAMemberOfOrganization(headerOrgId);
 			activeOrganizationId = headerOrgId;
 		}
 
 		return next({ ctx: { ...ctx, activeOrganizationId } });
 	});
+
+/**
+ * Callers pass the organization in a header (the CLI sends
+ * SUPERSET_ORGANIZATION_ID, or the organization it last logged into), so the
+ * id in this error is usually one the caller never typed. Saying where it
+ * came from is what turns "not a member" into something actionable.
+ */
+function notAMemberOfOrganization(organizationId: string): TRPCError {
+	return new TRPCError({
+		code: "FORBIDDEN",
+		message: `Not a member of organization ${organizationId}, which was asked for in the x-superset-organization-id header`,
+	});
+}
+
+/** A box's credential is its creator's, but it acts in the box's organization only. */
+function assertInBoxOrganization(
+	sandboxCaller: SandboxCaller | null,
+	organizationId: string | null,
+) {
+	if (
+		sandboxCaller &&
+		organizationId &&
+		organizationId !== sandboxCaller.organizationId
+	) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: `A cloud workspace can only act in its own organization, not ${organizationId}`,
+		});
+	}
+}
+
+const inBoxOrganization = (
+	sandboxCaller: SandboxCaller | null,
+	organizationIds: string[],
+) =>
+	sandboxCaller
+		? organizationIds.filter((id) => id === sandboxCaller.organizationId)
+		: organizationIds;
 
 function resolveActiveOrganizationId(
 	organizationIds: string[],
@@ -175,22 +239,21 @@ function resolveActiveOrganizationId(
 	}
 
 	if (!organizationIds.includes(requestedOrganizationId)) {
-		throw new TRPCError({
-			code: "FORBIDDEN",
-			message: `Not a member of organization ${requestedOrganizationId}`,
-		});
+		throw notAMemberOfOrganization(requestedOrganizationId);
 	}
 
 	return requestedOrganizationId;
 }
 
 export const jwtProcedure = t.procedure
+	.use(sandboxScope)
 	.use(async ({ ctx, next }) => {
 		const authHeader = ctx.headers.get("authorization");
 		const bearer = authHeader?.startsWith("Bearer ")
 			? authHeader.slice(7)
 			: null;
 		const headerOrgId = ctx.headers.get(ORGANIZATION_HEADER)?.trim() || null;
+		assertInBoxOrganization(ctx.sandboxCaller, headerOrgId);
 
 		if (bearer) {
 			try {
@@ -198,11 +261,14 @@ export const jwtProcedure = t.procedure
 					body: { token: bearer },
 				});
 				if (payload?.sub) {
-					const organizationIds = Array.isArray(payload.organizationIds)
-						? payload.organizationIds.filter(
-								(id): id is string => typeof id === "string",
-							)
-						: [];
+					const organizationIds = inBoxOrganization(
+						ctx.sandboxCaller,
+						Array.isArray(payload.organizationIds)
+							? payload.organizationIds.filter(
+									(id): id is string => typeof id === "string",
+								)
+							: [],
+					);
 					return next({
 						ctx: {
 							userId: payload.sub,
@@ -229,7 +295,10 @@ export const jwtProcedure = t.procedure
 				where: eq(members.userId, userId),
 				columns: { organizationId: true },
 			});
-			const organizationIds = memberRows.map((row) => row.organizationId);
+			const organizationIds = inBoxOrganization(
+				ctx.sandboxCaller,
+				memberRows.map((row) => row.organizationId),
+			);
 			return next({
 				ctx: {
 					userId,

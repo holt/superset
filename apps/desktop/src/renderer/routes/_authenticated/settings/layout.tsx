@@ -1,21 +1,24 @@
+import { FEATURE_FLAGS } from "@superset/shared/constants";
 import {
 	createFileRoute,
 	Outlet,
 	useLocation,
 	useNavigate,
 } from "@tanstack/react-router";
+import { useFeatureFlagEnabled } from "posthog-js/react";
 import { useEffect, useMemo } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { CheckResourcesHotkeyMount } from "renderer/commandPalette";
 import { useIsV2CloudEnabled } from "renderer/hooks/useIsV2CloudEnabled";
-import { electronTrpc } from "renderer/lib/electron-trpc";
+import { useHistoryNavigationShortcuts } from "renderer/routes/_authenticated/_dashboard/hooks/useHistoryNavigationShortcuts";
 import {
 	type SettingsSection,
 	useSetSettingsSearchQuery,
 	useSettingsOriginRoute,
 	useSettingsSearchQuery,
 } from "renderer/stores/settings-state";
-import { NavigationControls } from "../_dashboard/components/NavigationControls";
+import { WindowControlsInset } from "../_dashboard/components/WindowControlsInset";
+import { ContentBoundary } from "../components/ContentBoundary";
 import { SearchResultsBanner } from "./components/SearchResultsBanner";
 import {
 	FULL_WIDTH_SECTION_PATHS,
@@ -30,16 +33,20 @@ export const Route = createFileRoute("/_authenticated/settings")({
 
 const SECTION_ORDER: SettingsSection[] = [
 	"account",
+	"connections",
 	"appearance",
 	"ringtones",
 	"usage",
+	"mobile",
 	"keyboard",
 	"behavior",
 	"git",
 	"agents",
 	"terminal",
-	"links",
+	"files",
 	"browser",
+	"environments",
+	"agentAccounts",
 	"organization",
 	"teams",
 	"project",
@@ -58,7 +65,9 @@ const SECTION_ORDER: SettingsSection[] = [
  * hand-maintained lookups that can drift out of sync with each other.
  */
 const SECTION_PATHS: Partial<Record<SettingsSection, string>> = {
+	mobile: "/settings/mobile",
 	account: "/settings/account",
+	connections: "/settings/connections",
 	organization: "/settings/organization",
 	teams: "/settings/teams",
 	appearance: "/settings/appearance",
@@ -69,7 +78,7 @@ const SECTION_PATHS: Partial<Record<SettingsSection, string>> = {
 	git: "/settings/git",
 	agents: "/settings/agents",
 	terminal: "/settings/terminal",
-	links: "/settings/links",
+	files: "/settings/files",
 	browser: "/settings/browser",
 	experimental: "/settings/experimental",
 	integrations: "/settings/integrations",
@@ -103,13 +112,16 @@ const NON_ROUTABLE_ESCAPE_PARENTS = new Set([
 ]);
 
 function SettingsLayout() {
-	const { data: platform } = electronTrpc.window.getPlatform.useQuery();
 	const isV2CloudEnabled = useIsV2CloudEnabled();
-	const isMac = platform === undefined || platform === "darwin";
+	const mobileEnabled =
+		useFeatureFlagEnabled(FEATURE_FLAGS.MOBILE_LAUNCH) === true;
+	const cloudWorkspacesEnabled =
+		useFeatureFlagEnabled(FEATURE_FLAGS.CLOUD_WORKSPACES) === true;
 	const searchQuery = useSettingsSearchQuery();
 	const setSearchQuery = useSetSettingsSearchQuery();
 	const originRoute = useSettingsOriginRoute();
 	const location = useLocation();
+	useHistoryNavigationShortcuts();
 	const navigate = useNavigate();
 	// Reset scroll to top when navigating to a different settings page.
 	const contentRef = useScrollReset<HTMLDivElement>(location.pathname);
@@ -120,9 +132,20 @@ function SettingsLayout() {
 	const matchCounts = useMemo(
 		() =>
 			isSearchActive
-				? getVisibleMatchCountBySection(normalizedSearchQuery, isV2CloudEnabled)
+				? getVisibleMatchCountBySection(
+						normalizedSearchQuery,
+						isV2CloudEnabled,
+						cloudWorkspacesEnabled,
+						mobileEnabled,
+					)
 				: {},
-		[isSearchActive, normalizedSearchQuery, isV2CloudEnabled],
+		[
+			isSearchActive,
+			normalizedSearchQuery,
+			isV2CloudEnabled,
+			cloudWorkspacesEnabled,
+			mobileEnabled,
+		],
 	);
 	const totalMatches = Object.values(matchCounts).reduce(
 		(sum, count) => sum + count,
@@ -178,22 +201,17 @@ function SettingsLayout() {
 	);
 
 	return (
-		<div className="flex flex-col h-screen w-screen bg-background">
+		<div className="flex h-screen w-screen bg-background">
 			{/* CommandPaletteHost (Cmd/Ctrl+K etc.) only mounts inside the
 			    _dashboard route tree; CHECK_RESOURCES needs its own mount here so
 			    the hotkey and native "Resources" menu item still work in Settings. */}
 			<CheckResourcesHotkeyMount />
-			<div className="flex h-12 w-full items-center bg-sidebar dark:bg-muted/35">
-				<div
-					className="drag h-full shrink-0"
-					style={{ width: isMac ? "96px" : "8px" }}
-				/>
-				<NavigationControls />
-				<div className="drag h-full min-w-0 flex-1" />
-			</div>
-
-			<div className="flex flex-1 overflow-hidden bg-background">
-				<SettingsSidebar />
+			<SettingsSidebar />
+			<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+				<div className="flex h-12 shrink-0">
+					<div className="drag h-full min-w-0 flex-1" />
+					<WindowControlsInset />
+				</div>
 				<div ref={contentRef} className="flex-1 overflow-auto">
 					{isSearchActive && (
 						<SearchResultsBanner
@@ -202,13 +220,15 @@ function SettingsLayout() {
 							onClear={() => setSearchQuery("")}
 						/>
 					)}
-					{usesFullWidthContent ? (
-						<Outlet />
-					) : (
-						<div className="mx-auto max-w-4xl">
+					<ContentBoundary>
+						{usesFullWidthContent ? (
 							<Outlet />
-						</div>
-					)}
+						) : (
+							<div className="mx-auto max-w-4xl">
+								<Outlet />
+							</div>
+						)}
+					</ContentBoundary>
 				</div>
 			</div>
 		</div>

@@ -19,9 +19,10 @@ import {
 	Globe,
 	MessageSquare,
 	Monitor,
+	Smartphone,
 } from "lucide-react";
 import { useFeatureFlagEnabled } from "posthog-js/react";
-import { useCallback, useMemo } from "react";
+import { useMemo } from "react";
 import {
 	LuArrowDownToLine,
 	LuBot,
@@ -41,7 +42,9 @@ import {
 	probeTerminalRunning,
 } from "renderer/lib/terminal/confirm-close-terminals";
 import { consumeTerminalBackgroundIntent } from "renderer/lib/terminal/terminal-background-intents";
+import { writeTerminalClipboard } from "renderer/lib/terminal/terminal-clipboard";
 import { terminalRuntimeRegistry } from "renderer/lib/terminal/terminal-runtime-registry";
+import type { OpenFile } from "renderer/routes/_authenticated/_dashboard/v2-workspace/$workspaceId/types";
 import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import { useCollections } from "renderer/routes/_authenticated/providers/CollectionsProvider";
 import { getV2NotificationSourcesForPane } from "renderer/stores/v2-notifications";
@@ -69,7 +72,14 @@ import {
 	focusOrAddTerminalPane,
 } from "../../utils/focusTerminalPane";
 import { openSubagentPaneInStore } from "../../utils/openSubagentPaneInStore";
+import { useAgentSessionLauncher } from "../useAgentSessionLauncher";
+import type { OpenReviewDiff } from "../useReviewCommentNavigation";
 import type { TerminalLauncher } from "../useV2TerminalLauncher";
+import {
+	AgentSurfaceToggle,
+	AgentTerminalPane,
+	useAgentSurfaceSwitch,
+} from "./components/AgentTerminalPane";
 import { BrowserPane, BrowserPaneToolbar } from "./components/BrowserPane";
 import { ChatV3Pane } from "./components/ChatV3Pane";
 import { CommentPane } from "./components/CommentPane";
@@ -80,19 +90,20 @@ import { DiffPane } from "./components/DiffPane";
 import { DiffPaneHeaderExtras } from "./components/DiffPane/components/DiffPaneHeaderExtras";
 import { FilePane } from "./components/FilePane";
 import { FilePaneHeaderExtras } from "./components/FilePane/components/FilePaneHeaderExtras";
+import { MobilePane } from "./components/MobilePane";
 import { PagePane } from "./components/PagePane";
 import { PagePaneHeaderExtras } from "./components/PagePaneHeaderExtras";
 import { PagePaneTitle } from "./components/PagePaneTitle";
 import { PullRequestPane } from "./components/PullRequestPane";
 import { PullRequestPaneHeaderExtras } from "./components/PullRequestPane/components/PullRequestPaneHeaderExtras";
 import { SubagentPane } from "./components/SubagentPane";
-import { TerminalPane } from "./components/TerminalPane";
 import { TerminalPaneHeaderExtras } from "./components/TerminalPane/components/TerminalPaneHeaderExtras";
 import { TerminalPaneIcon } from "./components/TerminalPane/components/TerminalPaneIcon";
 import { TerminalSessionDropdown } from "./components/TerminalPane/components/TerminalSessionDropdown";
 import { terminalContextMenuLinkStore } from "./components/TerminalPane/contextMenuLinkStore";
 import { openInActions } from "./utils/openInActions";
 import { pagePaneLabel } from "./utils/pagePaneLabel";
+import { replaceEndedTerminal } from "./utils/replaceEndedTerminal";
 
 function getFileName(filePath: string): string {
 	return getBaseName(filePath);
@@ -138,13 +149,17 @@ const MOD_KEY = navigator.platform.toLowerCase().includes("mac")
 	: "Ctrl+";
 
 interface UsePaneRegistryOptions {
-	onOpenFile: (path: string, openInNewTab?: boolean) => void;
+	onOpenDiff: OpenReviewDiff;
+	onOpenComment: (comment: CommentPaneData) => void;
+	onOpenFile: OpenFile;
 	onRevealPath: (path: string) => void;
 	launcher: TerminalLauncher;
 	store: StoreApi<WorkspaceStore<PaneViewerData>>;
 }
 
 export function usePaneRegistry({
+	onOpenDiff,
+	onOpenComment,
 	onOpenFile,
 	onRevealPath,
 	launcher,
@@ -154,11 +169,10 @@ export function usePaneRegistry({
 	const { workspace } = useWorkspace();
 	const workspaceId = workspace.id;
 	const isChatV3Enabled = useFeatureFlagEnabled(FEATURE_FLAGS.CHAT_V3) ?? false;
+	const agentSurface = useAgentSurfaceSwitch(workspaceId);
 	const host = useWorkspaceHostTarget(workspaceId);
-	const sandboxUrl =
-		host.status === "ready" && host.kind === "sandbox" ? host.url : null;
-	const isPagesEnabled = useFeatureFlagEnabled(FEATURE_FLAGS.PAGES) ?? false;
-	const runAgent = workspaceTrpc.agents.run.useMutation();
+	const desktopUrl =
+		host.status === "ready" && host.kind === "sandbox" ? host.desktopUrl : null;
 	const collections = useCollections();
 	const clearShortcut = useHotkeyDisplay("CLEAR_TERMINAL").text;
 	const scrollToBottomShortcut = useHotkeyDisplay("SCROLL_TO_BOTTOM").text;
@@ -213,70 +227,8 @@ export function usePaneRegistry({
 		[collections.v2WorkspaceLocalState, workspaceId],
 	);
 
-	const createNewAgentSession = useCallback(
-		async (input: {
-			configId: string;
-			placement: "split-pane" | "new-tab";
-			prompt: string;
-			forkSessionId?: string;
-		}): Promise<{ terminalId: string } | null> => {
-			try {
-				// Host pipeline bakes the prompt into the initialCommand using the
-				// agent's argv/stdin transport — no follow-up writeInput needed,
-				// no bind-wait race vs. the launching shell.
-				const result = await runAgent.mutateAsync({
-					workspaceId,
-					agent: input.configId,
-					prompt: input.prompt,
-					...(input.forkSessionId
-						? { forkSessionId: input.forkSessionId }
-						: {}),
-				});
-				if (result.kind !== "terminal") {
-					toast.error(
-						t({
-							message: "Selected agent isn't a terminal agent",
-						}),
-					);
-					return null;
-				}
-				const terminalId = result.sessionId;
-				const state = store.getState();
-				const pane = {
-					kind: "terminal" as const,
-					titleOverride: result.label,
-					data: { terminalId } as TerminalPaneData,
-				};
-				if (input.placement === "split-pane" && state.activeTabId) {
-					state.addPane({ tabId: state.activeTabId, pane });
-				} else {
-					state.addTab({ panes: [pane] });
-				}
-				return { terminalId };
-			} catch (error) {
-				const description = errorMessage(
-					error,
-					t({
-						message: "Unknown error",
-					}),
-				);
-				toast.error(
-					t({
-						message: "Couldn't start agent session",
-					}),
-					{ description },
-				);
-				return null;
-			}
-		},
-		[runAgent, store, workspaceId, t],
-	);
-
-	const focusAgentTerminal = useCallback(
-		(terminalId: string) => {
-			focusOrAddTerminalPane(store, terminalId);
-		},
-		[store],
+	const { createNewAgentSession, focusAgentTerminal } = useAgentSessionLauncher(
+		{ workspaceId, store },
 	);
 
 	return useMemo<PaneRegistry<PaneViewerData>>(
@@ -314,6 +266,7 @@ export function usePaneRegistry({
 					const name = getFileName(data.filePath);
 					return new Promise<boolean>((resolve) => {
 						alert({
+							onDismiss: () => resolve(false),
 							title: t({
 								message: `Do you want to save the changes you made to ${name}?`,
 							}),
@@ -332,6 +285,14 @@ export function usePaneRegistry({
 											return;
 										}
 										const result = await doc.save();
+										if (result.status !== "saved") {
+											const target = store.getState().getPane(pane.id);
+											if (target)
+												store.getState().setActivePane({
+													tabId: target.tabId,
+													paneId: pane.id,
+												});
+										}
 										// Only proceed to close if the save succeeded; otherwise
 										// leave the pane open so the user can see the conflict /
 										// error state and retry.
@@ -446,11 +407,26 @@ export function usePaneRegistry({
 						},
 					);
 				},
-				onAfterClose: (pane) => {
-					const { terminalId } = pane.data as TerminalPaneData;
-					// Another pane still shows this terminal (one that followed a
-					// resumed session while its adopted duplicate closes): only
-					// this pane's runtime goes, the session stays.
+				onAfterClose: (pane, closedPanes) => {
+					const {
+						acpSessionId,
+						agentSurface: surface,
+						terminalId,
+					} = pane.data as TerminalPaneData;
+					// On the ACP surface the adapter is the only process the close has
+					// left to end: the pty was either stopped by the switch or — for a
+					// chat opened from the launcher — never started, and asking the
+					// host to kill an id it has never seen only logs a failure.
+					if (surface === "acp") {
+						if (acpSessionId) void agentSurface.stopChat(acpSessionId);
+						return;
+					}
+					const firstClosed = closedPanes.find(
+						(candidate) =>
+							candidate.kind === "terminal" &&
+							(candidate.data as TerminalPaneData).terminalId === terminalId,
+					);
+					if (firstClosed?.id !== pane.id) return;
 					if (findTerminalPaneLocation(store.getState(), terminalId)) {
 						terminalRuntimeRegistry.release(terminalId, pane.id);
 						return;
@@ -463,11 +439,25 @@ export function usePaneRegistry({
 					terminalRuntimeRegistry.dispose(terminalId);
 					killTerminalSessionSilently({ terminalId, workspaceId });
 				},
+				onAfterRemove: (pane) => {
+					terminalRuntimeRegistry.release(
+						(pane.data as TerminalPaneData).terminalId,
+						pane.id,
+					);
+				},
 				renderTitle: (ctx: RendererContext<PaneViewerData>) => (
 					<div className="flex min-w-0 flex-1 items-center gap-1.5">
 						<TerminalSessionDropdown
+							onSessionRemoved={clearWorkspaceRunTerminal}
 							context={ctx}
 							launcher={launcher}
+							workspaceId={workspaceId}
+						/>
+						<AgentSurfaceToggle
+							data={ctx.pane.data as TerminalPaneData}
+							onChange={(surface, agent) =>
+								void agentSurface.switchSurface(ctx, surface, agent)
+							}
 							workspaceId={workspaceId}
 						/>
 						<V2NotificationStatusIndicator
@@ -482,6 +472,25 @@ export function usePaneRegistry({
 							workspaceId={workspaceId}
 							terminalId={terminalId}
 							terminalInstanceId={ctx.pane.id}
+							onNewShell={() =>
+								replaceEndedTerminal({
+									store: ctx.store,
+									paneId: ctx.pane.id,
+									terminalId,
+									create: () => launcher.create(),
+									dispose: (id) =>
+										workspaceTrpcUtils.client.terminal.killSession.mutate({
+											terminalId: id,
+											workspaceId,
+										}),
+									prepare: () =>
+										terminalRuntimeRegistry.prepareReplacement(
+											terminalId,
+											ctx.pane.id,
+											t({ message: "New shell" }),
+										),
+								})
+							}
 							onCreateNewAgentSession={createNewAgentSession}
 							onOpenSubagent={(data) =>
 								openSubagentPaneInStore(ctx.store, data)
@@ -490,11 +499,11 @@ export function usePaneRegistry({
 					);
 				},
 				renderPane: (ctx: RendererContext<PaneViewerData>) => (
-					<TerminalPane
+					<AgentTerminalPane
 						ctx={ctx}
-						workspaceId={workspaceId}
 						onOpenFile={onOpenFile}
 						onRevealPath={onRevealPath}
+						workspaceId={workspaceId}
 					/>
 				),
 				contextMenuActions: (_ctx, defaults) => {
@@ -517,7 +526,11 @@ export function usePaneRegistry({
 									terminalId,
 									ctx.pane.id,
 								);
-								if (text) navigator.clipboard.writeText(text);
+								if (text) {
+									void writeTerminalClipboard(text).catch((error: unknown) => {
+										console.error("[terminal] Failed to copy selection", error);
+									});
+								}
 							},
 						},
 						{
@@ -705,7 +718,7 @@ export function usePaneRegistry({
 							: d,
 					),
 			},
-			...(sandboxUrl
+			...(desktopUrl
 				? {
 						desktop: {
 							getIcon: () => <Monitor className="size-3.5" />,
@@ -713,10 +726,18 @@ export function usePaneRegistry({
 								t({
 									message: "Desktop",
 								}),
-							renderPane: () => <DesktopPane hostUrl={sandboxUrl} />,
+							renderPane: () => <DesktopPane desktopUrl={desktopUrl} />,
 						},
 					}
 				: {}),
+			mobile: {
+				getIcon: () => <Smartphone className="size-3.5" />,
+				getTitle: () =>
+					t({
+						message: "Mobile",
+					}),
+				renderPane: () => <MobilePane />,
+			},
 			...(isChatV3Enabled
 				? {
 						"chat-v3": {
@@ -797,10 +818,14 @@ export function usePaneRegistry({
 				getIcon: () => <GitPullRequest className="size-3.5" />,
 				getTitle: (pane) => {
 					const data = pane.data as PullRequestPaneData;
-					return t({ message: `Pull request #${data.prNumber}` });
+					return t({ message: `Pull request #${data.number}` });
 				},
 				renderPane: (ctx: RendererContext<PaneViewerData>) => (
-					<PullRequestPane data={ctx.pane.data as PullRequestPaneData} />
+					<PullRequestPane
+						data={ctx.pane.data as PullRequestPaneData}
+						onOpenDiff={onOpenDiff}
+						onOpenComment={onOpenComment}
+					/>
 				),
 				renderHeaderExtras: (ctx: RendererContext<PaneViewerData>) => (
 					<PullRequestPaneHeaderExtras
@@ -838,49 +863,47 @@ export function usePaneRegistry({
 					/>
 				),
 			},
-			...(isPagesEnabled
-				? {
-						page: {
-							getIcon: () => <FileText className="size-3.5" />,
-							getTitle: (pane) => pagePaneLabel(pane.data as PagePaneData),
-							renderTitle: (ctx: RendererContext<PaneViewerData>) => (
-								<PagePaneTitle
-									data={ctx.pane.data as PagePaneData}
-									paneId={ctx.pane.id}
-									onClose={() => ctx.actions.close()}
-								/>
-							),
-							renderHeaderExtras: (ctx: RendererContext<PaneViewerData>) => (
-								<PagePaneHeaderExtras
-									data={ctx.pane.data as PagePaneData}
-									paneId={ctx.pane.id}
-									workspaceId={workspaceId}
-								/>
-							),
-							renderPane: (ctx: RendererContext<PaneViewerData>) => (
-								<PagePane
-									data={ctx.pane.data as PagePaneData}
-									paneId={ctx.pane.id}
-									onDataChange={(data) =>
-										ctx.actions.updateData(data as PaneViewerData)
-									}
-									onFocus={ctx.actions.focus}
-								/>
-							),
-							contextMenuActions: (_ctx, defaults) =>
-								defaults.map((d) =>
-									d.key === "close-pane"
-										? {
-												...d,
-												label: t({
-													message: "Close Page",
-												}),
-											}
-										: d,
-								),
-						},
-					}
-				: {}),
+			page: {
+				getIcon: () => <FileText className="size-3.5" />,
+				getTitle: (pane) => pagePaneLabel(pane.data as PagePaneData),
+				renderTitle: (ctx: RendererContext<PaneViewerData>) => (
+					<PagePaneTitle
+						data={ctx.pane.data as PagePaneData}
+						paneId={ctx.pane.id}
+						onClose={() => ctx.actions.close()}
+					/>
+				),
+				renderHeaderExtras: (ctx: RendererContext<PaneViewerData>) => (
+					<PagePaneHeaderExtras
+						onCreateNewAgentSession={createNewAgentSession}
+						data={ctx.pane.data as PagePaneData}
+						paneId={ctx.pane.id}
+						workspaceId={workspaceId}
+					/>
+				),
+				renderPane: (ctx: RendererContext<PaneViewerData>) => (
+					<PagePane
+						store={ctx.store}
+						data={ctx.pane.data as PagePaneData}
+						paneId={ctx.pane.id}
+						onDataChange={(data) =>
+							ctx.actions.updateData(data as PaneViewerData)
+						}
+						onFocus={ctx.actions.focus}
+					/>
+				),
+				contextMenuActions: (_ctx, defaults) =>
+					defaults.map((d) =>
+						d.key === "close-pane"
+							? {
+									...d,
+									label: t({
+										message: "Close Page",
+									}),
+								}
+							: d,
+					),
+			},
 			devtools: {
 				getTitle: () =>
 					t({
@@ -900,7 +923,7 @@ export function usePaneRegistry({
 			store,
 			workspaceId,
 			isChatV3Enabled,
-			isPagesEnabled,
+			agentSurface,
 			clearWorkspaceRunTerminal,
 			clearShortcut,
 			scrollToBottomShortcut,
@@ -908,13 +931,15 @@ export function usePaneRegistry({
 			killTerminalSessionSilently,
 			isKillingTerminalSession,
 			launcher,
+			onOpenDiff,
+			onOpenComment,
 			onOpenFile,
 			onRevealPath,
 			createNewAgentSession,
 			focusAgentTerminal,
 			workspaceTrpcUtils,
 			t,
-			sandboxUrl,
+			desktopUrl,
 		],
 	);
 }

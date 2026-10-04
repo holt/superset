@@ -75,12 +75,6 @@ export const PRICING_TIERS: PricingTier[] = [
 				}),
 			},
 			{
-				id: "githubIntegration",
-				label: msg({
-					message: "GitHub integration",
-				}),
-			},
-			{
 				id: "cli",
 				label: msg({
 					message: "CLI",
@@ -147,6 +141,12 @@ export const PRICING_TIERS: PricingTier[] = [
 				}),
 			},
 			{
+				id: "automations",
+				label: msg({
+					message: "Automations",
+				}),
+			},
+			{
 				id: "linearIntegration",
 				label: msg({
 					message: "Linear integration",
@@ -161,7 +161,7 @@ export const PRICING_TIERS: PricingTier[] = [
 			{
 				id: "mobile",
 				label: msg({
-					message: "Mobile (coming soon)",
+					message: "Mobile",
 				}),
 			},
 		],
@@ -328,19 +328,13 @@ export const COMPARISON_SECTIONS: ComparisonSection[] = [
 					message: "Remote access",
 				}),
 				values: [null, true, true],
-				badge: {
-					label: msg({
-						message: "Beta",
-					}),
-					variant: "default",
-				},
 			},
 			{
 				id: "automations",
 				label: msg({
 					message: "Automations",
 				}),
-				values: [true, true, true],
+				values: [null, true, true],
 			},
 			{
 				id: "mobileApp",
@@ -348,19 +342,6 @@ export const COMPARISON_SECTIONS: ComparisonSection[] = [
 					message: "Mobile app",
 				}),
 				values: [null, true, true],
-				badge: {
-					label: msg({
-						message: "Coming soon",
-					}),
-					variant: "secondary",
-				},
-			},
-			{
-				id: "githubIntegration",
-				label: msg({
-					message: "GitHub integration",
-				}),
-				values: [true, true, true],
 			},
 			{
 				id: "linearIntegration",
@@ -473,7 +454,7 @@ export const PRICING_FAQ_ITEMS: PricingFAQItem[] = [
 		}),
 		answer: msg({
 			message:
-				"Yes. Free covers individuals with 1 user, local workspaces, the desktop app, the CLI, and GitHub integration. No credit card required.",
+				"Yes. Free covers individuals with 1 user, local workspaces, the desktop app, and the CLI. No credit card required.",
 		}),
 	},
 	{

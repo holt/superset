@@ -4,6 +4,12 @@
 
 @source "./**/*.{ts,tsx}";
 @source "../../../../packages/ui/src/**/*.{ts,tsx}";
+@source "../../../../packages/chat-ui/src/**/*.{ts,tsx}";
+/* @superset/panes renders inside this app with its own class names. Without
+   this scan any utility used only there (PANE_MIN_SIZE_CLASS_NAME's
+   min-w-[260px], the pane header's @container) never gets generated and
+   silently does nothing — panes could squeeze far below their minimum. */
+@source "../../../../packages/panes/src/**/*.{ts,tsx}";
 @source "../../../../packages/ui/node_modules/streamdown/dist/*.js";
 
 /**
@@ -283,6 +289,18 @@
 	}
 
 	.no-drag {
+		-webkit-app-region: no-drag;
+	}
+
+	/* The OS eats clicks on drag regions, so an open overlay could never be
+	   dismissed by clicking a header. */
+	body:has(
+		[role="menu"][data-state="open"],
+		[role="listbox"][data-state="open"],
+		[role="dialog"][data-state="open"],
+		[role="alertdialog"][data-state="open"]
+	)
+	.drag {
 		-webkit-app-region: no-drag;
 	}
 

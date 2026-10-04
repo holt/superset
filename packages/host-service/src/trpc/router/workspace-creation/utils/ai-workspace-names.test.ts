@@ -1,7 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { generateWorkspaceNamesFromPrompt } from "./ai-workspace-names";
+import {
+	generateWorkspaceNamesFromPrompt,
+	resolveGeneratedBranchName,
+	trimTitle,
+} from "./ai-workspace-names";
 
 describe("generateWorkspaceNamesFromPrompt", () => {
+	test("background naming keeps the random fallback when AI is unavailable", async () => {
+		await expect(
+			generateWorkspaceNamesFromPrompt(
+				"https://superset.sh please fix login",
+				undefined,
+				undefined,
+				undefined,
+				false,
+			),
+		).resolves.toBeNull();
+	});
 	test("derives names from the prompt when no agent context is supplied", async () => {
 		await expect(
 			generateWorkspaceNamesFromPrompt("  Fix the login   redirect loop! "),
@@ -45,5 +60,84 @@ describe("generateWorkspaceNamesFromPrompt", () => {
 			title: "fix the login redirect",
 			branchName: "fix-the-login-redirect",
 		});
+	});
+});
+
+describe("resolveGeneratedBranchName", () => {
+	test("reapplies the project's branch prefix onto the AI's bare candidate", () => {
+		expect(
+			resolveGeneratedBranchName({
+				candidate: "fix-login-timeout",
+				branchPrefix: "kiet",
+				oldBranchName: "kiet/quick-brown-fox",
+			}),
+		).toEqual({
+			prefixedCandidate: "kiet/fix-login-timeout",
+			changed: true,
+		});
+	});
+
+	test("strips a prefix the model echoed instead of doubling it", () => {
+		expect(
+			resolveGeneratedBranchName({
+				candidate: "kiet/fix-login-timeout",
+				branchPrefix: "kiet",
+				oldBranchName: "kiet/quick-brown-fox",
+			}),
+		).toEqual({
+			prefixedCandidate: "kiet/fix-login-timeout",
+			changed: true,
+		});
+	});
+
+	test("passes the candidate through unprefixed when there's no configured prefix", () => {
+		expect(
+			resolveGeneratedBranchName({
+				candidate: "fix-login-timeout",
+				branchPrefix: undefined,
+				oldBranchName: "quick-brown-fox",
+			}),
+		).toEqual({
+			prefixedCandidate: "fix-login-timeout",
+			changed: true,
+		});
+	});
+
+	test("reports no change when the prefixed candidate matches the current branch", () => {
+		expect(
+			resolveGeneratedBranchName({
+				candidate: "fix-login-timeout",
+				branchPrefix: "kiet",
+				oldBranchName: "kiet/fix-login-timeout",
+			}),
+		).toEqual({
+			prefixedCandidate: "kiet/fix-login-timeout",
+			changed: false,
+		});
+	});
+
+	test("reports no change for an empty candidate, even with a prefix", () => {
+		expect(
+			resolveGeneratedBranchName({
+				candidate: "",
+				branchPrefix: "kiet",
+				oldBranchName: "kiet/quick-brown-fox",
+			}),
+		).toEqual({
+			prefixedCandidate: "kiet/",
+			changed: false,
+		});
+	});
+});
+
+describe("trimTitle", () => {
+	test("keeps the first line, drops wrapping quotes and trailing punctuation, single-spaces", () => {
+		expect(trimTitle('  "Fix   login timeout."\nSecond line')).toBe(
+			"Fix login timeout",
+		);
+		expect(trimTitle("`Add   tests`. ")).toBe("Add tests");
+		expect(trimTitle("'Fix login.'")).toBe("Fix login");
+		expect(trimTitle("Retry — ")).toBe("Retry");
+		expect(trimTitle("\n\n")).toBe("");
 	});
 });

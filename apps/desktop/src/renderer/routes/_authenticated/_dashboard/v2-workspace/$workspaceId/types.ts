@@ -1,5 +1,17 @@
 import type { AgentIdentityId } from "@superset/shared/agent-catalog";
+export interface FilePosition {
+	line: number;
+	column?: number;
+}
+
+export type OpenFile = (
+	path: string,
+	openInNewTab?: boolean,
+	position?: FilePosition,
+) => void;
+
 export interface FilePaneData {
+	pendingPosition?: FilePosition;
 	filePath: string;
 	mode: "editor" | "diff" | "preview";
 	language?: string;
@@ -17,6 +29,34 @@ export interface TerminalPaneData {
 	 * clobber a live or exited session.
 	 */
 	createOnAttach?: boolean;
+	/**
+	 * Which surface an agent terminal shows. Only one of the two runs at a time:
+	 * on "acp" the pty is stopped and the chat drives the agent session; going
+	 * back to "cli" stops the chat and relaunches the agent on its resume args.
+	 * Absent means the terminal, as it always was.
+	 */
+	agentSurface?: "cli" | "acp";
+	/** chat-runtime session the ACP surface resumed this agent into. */
+	acpSessionId?: string | null;
+	/**
+	 * Captured before the pty is stopped, because the terminal row and its agent
+	 * binding go with it — and they are what the trip back needs. A pane opened
+	 * straight onto the chat has no session yet: the agent reports one on its
+	 * first turn, and until then there is nothing to resume on either surface.
+	 */
+	agent?: {
+		id: string;
+		sessionId?: string;
+	};
+	/** First message for a chat opened from the launcher, sent once. */
+	pendingPrompt?: string;
+	pendingAttachments?: Array<{
+		attachmentId: string;
+		name: string;
+		mimeType: string;
+	}>;
+	chatModelId?: string;
+	chatModeId?: string;
 }
 
 export interface BrowserPaneData {
@@ -53,9 +93,9 @@ export interface CommentPaneData {
 	line?: number;
 }
 
-/** The workspace's linked PR, shown as its summary (description, checks, merge). */
 export interface PullRequestPaneData {
-	prNumber: number;
+	repoFullName: string;
+	number: number;
 }
 
 export interface PagePaneData {
@@ -72,6 +112,10 @@ export interface DesktopPaneData {
 	kind: "desktop";
 }
 
+export interface MobilePaneData {
+	kind: "mobile";
+}
+
 /**
  * Pointer to one subagent's transcript. The transcript itself is fetched
  * from the host on every read; only this pointer is persisted.
@@ -85,6 +129,25 @@ export interface SubagentPaneData {
 	agentType?: string;
 }
 
+export type WorkspaceSearchKey =
+	| "terminalId"
+	| "focusRequestId"
+	| "subagentTerminalId"
+	| "subagentId"
+	| "subagentAgentId"
+	| "subagentType"
+	| "openUrl"
+	| "openUrlTarget"
+	| "openUrlRequestId";
+
+/**
+ * Drops the search params a deep link arrived with, once the hook that owns
+ * them has acted. Router history is persisted with its search params and
+ * replayed at boot, so a link left in the URL fires again on every relaunch
+ * and on every Back onto that entry.
+ */
+export type ConsumeSearch = (keys: WorkspaceSearchKey[]) => void;
+
 export type PaneViewerData =
 	| FilePaneData
 	| TerminalPaneData
@@ -96,4 +159,5 @@ export type PaneViewerData =
 	| PullRequestPaneData
 	| PagePaneData
 	| DesktopPaneData
+	| MobilePaneData
 	| SubagentPaneData;

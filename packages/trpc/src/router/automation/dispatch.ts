@@ -1,33 +1,56 @@
 import { mintUserJwt } from "@superset/auth/server";
 import { db } from "@superset/db/client";
+import type { AutomationRunErrorCode } from "@superset/db/enums";
 import {
 	automationEvents,
 	automationRuns,
-	automations,
 	githubRepositories,
 	type SelectAutomation,
 	v2Hosts,
 	v2Projects,
 	v2UsersHosts,
 } from "@superset/db/schema";
+import { CLOUD_AGENT_PROMPT_MAX_LENGTH } from "@superset/shared/cloud-agent-launch";
 import { parseGitHubRemote } from "@superset/shared/github-remote";
-import { buildHostRoutingKey } from "@superset/shared/host-routing";
+import {
+	buildHostRoutingKey,
+	CLOUD_HOST_ID,
+} from "@superset/shared/host-routing";
 import {
 	deduplicateBranchName,
 	sanitizeBranchNameWithMaxLength,
 	slugifyForBranch,
 } from "@superset/shared/workspace-launch";
 import { and, eq, sql } from "drizzle-orm";
+import { nudge } from "../../lib/realtime";
 import { fetchRelayPresence } from "../../lib/relay-presence";
+import { runInCloud } from "./cloudDispatch";
 import { RelayDispatchError, relayMutation } from "./relay-client";
+import {
+	type AgentRunResult,
+	classifyDispatchError,
+	describeError,
+	nonForkPullRequest,
+	previousRunTerminal,
+	type RunWorkspace,
+	replacePin,
+} from "./run";
 import { promptWithTriggerContext } from "./triggerContext";
-
-type AgentRunResult = { kind: "terminal"; sessionId: string; label: string };
 
 export type DispatchOutcome =
 	| { status: "dispatched"; runId: string }
-	| { status: "skipped_offline"; runId: string | null; error: string }
-	| { status: "dispatch_failed"; runId: string | null; error: string }
+	| {
+			status: "skipped_offline";
+			runId: string | null;
+			error: string;
+			errorCode: AutomationRunErrorCode | null;
+	  }
+	| {
+			status: "dispatch_failed";
+			runId: string | null;
+			error: string;
+			errorCode: AutomationRunErrorCode | null;
+	  }
 	| { status: "conflict" };
 
 /**
@@ -45,7 +68,10 @@ export type DispatchableAutomation = Pick<
 	| "targetHostId"
 	| "v2ProjectId"
 	| "v2WorkspaceId"
+	| "cloudWorkspaceId"
+	| "environmentId"
 	| "tags"
+	| "continueAgentSession"
 >;
 
 /**
@@ -112,8 +138,36 @@ export async function dispatchAutomation(
 			automation.targetHostId,
 			"dispatch_failed",
 			error,
+			"no_instructions",
 		);
-		return { status: "dispatch_failed", runId: inserted?.id ?? null, error };
+		return {
+			status: "dispatch_failed",
+			runId: inserted?.id ?? null,
+			error,
+			errorCode: "no_instructions",
+		};
+	}
+
+	if (automation.targetHostId === CLOUD_HOST_ID) {
+		return dispatchRun(
+			automation,
+			cause,
+			CLOUD_HOST_ID,
+			async (_run, placed) => {
+				const event = await causeEvent(cause);
+				return runInCloud({
+					automation,
+					prompt: runPrompt(
+						automation,
+						cause,
+						event,
+						CLOUD_AGENT_PROMPT_MAX_LENGTH,
+					),
+					event,
+					placed,
+				});
+			},
+		);
 	}
 
 	const candidates = await resolveCandidateHosts(automation);
@@ -125,8 +179,14 @@ export async function dispatchAutomation(
 			null,
 			"skipped_offline",
 			error,
+			"host_offline",
 		);
-		return { status: "skipped_offline", runId: inserted?.id ?? null, error };
+		return {
+			status: "skipped_offline",
+			runId: inserted?.id ?? null,
+			error,
+			errorCode: "host_offline",
+		};
 	}
 
 	const host = await pickOnlineHost(automation, relayUrl, candidates);
@@ -138,27 +198,17 @@ export async function dispatchAutomation(
 			candidates[0]?.machineId ?? null,
 			"skipped_offline",
 			error,
+			"host_offline",
 		);
-		return { status: "skipped_offline", runId: inserted?.id ?? null, error };
+		return {
+			status: "skipped_offline",
+			runId: inserted?.id ?? null,
+			error,
+			errorCode: "host_offline",
+		};
 	}
 
-	const [run] = await db
-		.insert(automationRuns)
-		.values({
-			automationId: automation.id,
-			organizationId: automation.organizationId,
-			title: automation.name,
-			...cause,
-			hostId: host.machineId,
-			status: "dispatching",
-		})
-		.onConflictDoNothing(runDedupTarget(cause))
-		.returning();
-
-	if (!run) return { status: "conflict" };
-
-	let workspaceId: string | null = null;
-	try {
+	return dispatchRun(automation, cause, host.machineId, async (run, placed) => {
 		const jwt = await mintUserJwt({
 			userId: automation.ownerUserId,
 			organizationIds: [automation.organizationId],
@@ -172,22 +222,7 @@ export async function dispatchAutomation(
 			host.machineId,
 		);
 
-		const event = cause.eventId
-			? ((await db.query.automationEvents.findFirst({
-					where: eq(automationEvents.id, cause.eventId),
-					columns: {
-						provider: true,
-						eventType: true,
-						title: true,
-						url: true,
-						actorLogin: true,
-						ref: true,
-						repositoryId: true,
-						payload: true,
-						receivedAt: true,
-					},
-				})) ?? null)
-			: null;
+		const event = await causeEvent(cause);
 		const pullRequest = event
 			? await pullRequestToCheckOut(event, automation.v2ProjectId)
 			: null;
@@ -202,18 +237,20 @@ export async function dispatchAutomation(
 				runId: run.id,
 				pullRequest,
 			});
+			placed({ v2WorkspaceId: created.workspaceId });
 			return created.workspaceId;
 		};
 
-		const prompt = promptWithTriggerContext(
-			automation.prompt,
-			{
-				automationId: automation.id,
-				triggerId: cause.triggerId,
-				scheduledFor: cause.scheduledFor,
-			},
-			event,
-		);
+		const prompt = runPrompt(automation, cause, event);
+
+		// Opt-in, and only for a pinned workspace: that is where a session from
+		// a previous run can still be alive.
+		const continueTerminalId =
+			automation.continueAgentSession && automation.v2WorkspaceId
+				? await previousRunTerminal(automation.id, {
+						v2WorkspaceId: automation.v2WorkspaceId,
+					})
+				: undefined;
 
 		const runAgent = (targetWorkspaceId: string) =>
 			runAgentOnHost({
@@ -223,18 +260,23 @@ export async function dispatchAutomation(
 				workspaceId: targetWorkspaceId,
 				agent: automation.agent,
 				prompt,
+				// Only the pinned workspace holds that session; the stale-pin
+				// recovery below branches a fresh one, which has none.
+				...(continueTerminalId && targetWorkspaceId === automation.v2WorkspaceId
+					? { continueTerminalId }
+					: {}),
 			});
 
-		workspaceId = automation.v2WorkspaceId ?? (await createFreshWorkspace());
+		const stalePin = automation.v2WorkspaceId;
+		if (stalePin) placed({ v2WorkspaceId: stalePin });
+		const workspaceId = stalePin ?? (await createFreshWorkspace());
 
-		let result: AgentRunResult;
 		try {
-			result = await runAgent(workspaceId);
+			return await runAgent(workspaceId);
 		} catch (err) {
 			// Fall back only when the host says the pinned workspace is gone:
 			// tRPC NOT_FOUND (404) naming the pinned id. Other NOT_FOUNDs
 			// (agent config, attachments) rethrow.
-			const stalePin = automation.v2WorkspaceId;
 			const pinGone =
 				stalePin !== null &&
 				stalePin === workspaceId &&
@@ -242,48 +284,106 @@ export async function dispatchAutomation(
 				err.status === 404 &&
 				err.message.includes(stalePin);
 			if (!pinGone) throw err;
-			// Clear the pin (CAS so a concurrent repin is never erased) and use
-			// a fresh workspace from here on.
-			await db
-				.update(automations)
-				.set({ v2WorkspaceId: null })
-				.where(
-					and(
-						eq(automations.id, automation.id),
-						eq(automations.v2WorkspaceId, stalePin),
-					),
-				);
-			// Don't let the outer catch record the dead id if fresh-create throws.
-			workspaceId = null;
-			workspaceId = await createFreshWorkspace();
-			result = await runAgent(workspaceId);
+			await replacePin(automation.id, { v2WorkspaceId: stalePin }, null);
+			// Don't let a failed fresh create record the dead id.
+			placed(null);
+			return runAgent(await createFreshWorkspace());
 		}
+	});
+}
 
+/** Inserts the run and always settles it, so no run stays in `dispatching`. */
+async function dispatchRun(
+	automation: DispatchableAutomation,
+	cause: RunCause,
+	hostId: string,
+	start: (
+		run: { id: string },
+		placed: (workspace: RunWorkspace | null) => void,
+	) => Promise<AgentRunResult | null>,
+): Promise<DispatchOutcome> {
+	const [run] = await db
+		.insert(automationRuns)
+		.values({
+			automationId: automation.id,
+			organizationId: automation.organizationId,
+			title: automation.name,
+			...cause,
+			hostId,
+			status: "dispatching",
+		})
+		.onConflictDoNothing(runDedupTarget(cause))
+		.returning();
+
+	if (!run) return { status: "conflict" };
+
+	let workspace = null as RunWorkspace | null;
+	try {
+		const session = await start(run, (placed) => {
+			workspace = placed;
+		});
 		await db
 			.update(automationRuns)
 			.set({
 				status: "dispatched",
-				sessionKind: result.kind,
+				sessionKind: session?.kind ?? null,
 				chatSessionId: null,
-				terminalSessionId: result.sessionId,
-				v2WorkspaceId: workspaceId,
+				terminalSessionId: session?.sessionId ?? null,
+				...workspace,
 				dispatchedAt: new Date(),
 			})
 			.where(eq(automationRuns.id, run.id));
 	} catch (err) {
 		const error = describeError(err, "dispatch");
+		const errorCode = classifyDispatchError(err);
 		await db
 			.update(automationRuns)
-			.set({
-				status: "dispatch_failed",
-				v2WorkspaceId: workspaceId,
-				error,
-			})
+			.set({ status: "dispatch_failed", ...workspace, error, errorCode })
 			.where(eq(automationRuns.id, run.id));
-		return { status: "dispatch_failed", runId: run.id, error };
+		nudge(automation.organizationId, "automation_runs");
+		return { status: "dispatch_failed", runId: run.id, error, errorCode };
 	}
 
+	nudge(automation.organizationId, "automation_runs");
 	return { status: "dispatched", runId: run.id };
+}
+
+function runPrompt(
+	automation: DispatchableAutomation,
+	cause: RunCause,
+	event: Awaited<ReturnType<typeof causeEvent>>,
+	maxLength?: number,
+): string {
+	return promptWithTriggerContext(
+		automation.prompt,
+		{
+			automationId: automation.id,
+			triggerId: cause.triggerId,
+			scheduledFor: cause.scheduledFor,
+		},
+		event,
+		maxLength,
+	);
+}
+
+async function causeEvent(cause: RunCause) {
+	if (!cause.eventId) return null;
+	return (
+		(await db.query.automationEvents.findFirst({
+			where: eq(automationEvents.id, cause.eventId),
+			columns: {
+				provider: true,
+				eventType: true,
+				title: true,
+				url: true,
+				actorLogin: true,
+				ref: true,
+				repositoryId: true,
+				payload: true,
+				receivedAt: true,
+			},
+		})) ?? null
+	);
 }
 
 async function resolveCandidateHosts(
@@ -402,6 +502,7 @@ async function recordUndispatched(
 	hostId: string | null,
 	status: "skipped_offline" | "dispatch_failed",
 	error: string,
+	errorCode: AutomationRunErrorCode,
 ): Promise<{ id: string } | undefined> {
 	const [row] = await db
 		.insert(automationRuns)
@@ -413,21 +514,21 @@ async function recordUndispatched(
 			hostId,
 			status,
 			error,
+			errorCode,
 		})
 		.onConflictDoNothing(runDedupTarget(cause))
 		.returning({ id: automationRuns.id });
+	if (row) nudge(automation.organizationId, "automation_runs");
 	return row;
 }
 
 /**
  * The pull request a run should be checked out on, or null to branch fresh.
  *
- * Only for a GitHub event that names one, and only when the automation's
- * project really is that repository: a trigger watching one repo can dispatch
- * into a project pointed at another, and PR numbers are per-repository, so an
- * unchecked number would check out an unrelated pull request. Fork pull
- * requests are refused for the same reason `includeForks` is a literal false —
- * their head is attacker-controlled content the agent would then run in.
+ * Only when the automation's project really is the event's repository: a
+ * trigger watching one repo can dispatch into a project pointed at another,
+ * and PR numbers are per-repository, so an unchecked number would check out
+ * an unrelated pull request.
  *
  * `pr` has been on `workspaces.create` since 0.1.0, well under the host floor,
  * so there is no version to gate on.
@@ -436,22 +537,10 @@ async function pullRequestToCheckOut(
 	event: { provider: string; repositoryId: string | null; payload: unknown },
 	projectId: string | null,
 ): Promise<number | null> {
-	if (event.provider !== "github") return null;
 	// A session automation has no project, and so no repository to check out in.
 	if (projectId === null || event.repositoryId === null) return null;
-
-	const payload = event.payload as {
-		pull_request?: { number?: number; head?: { repo?: { fork?: boolean } } };
-	} | null;
-	// Only a PR-shaped payload carries the head repository, and its absence is
-	// not evidence of absence: an `issue_comment` on a fork PR is
-	// indistinguishable from one on a local PR, which is why the matcher's
-	// `isFork` is false for both. So require a positive "not a fork" rather
-	// than refusing only an explicit one — a comment event names a PR number
-	// it cannot prove is safe, and must not check one out.
-	if (payload?.pull_request?.head?.repo?.fork !== false) return null;
-	const number = payload.pull_request.number;
-	if (number === undefined) return null;
+	const pullRequest = nonForkPullRequest(event);
+	if (!pullRequest) return null;
 
 	const [project] = await db
 		.select({ repoCloneUrl: v2Projects.repoCloneUrl })
@@ -473,7 +562,7 @@ async function pullRequestToCheckOut(
 	// GitHub slugs are case-insensitive, on both sides of the comparison.
 	return repository.fullName.toLowerCase() ===
 		`${parsed.owner}/${parsed.name}`.toLowerCase()
-		? number
+		? pullRequest.number
 		: null;
 }
 
@@ -605,12 +694,15 @@ async function runAgentOnHost(args: {
 	workspaceId: string;
 	agent: string;
 	prompt: string;
+	/** See {@link previousRunTerminal}. */
+	continueTerminalId?: string;
 }): Promise<AgentRunResult> {
 	return relayMutation<
 		{
 			workspaceId: string;
 			agent: string;
 			prompt: string;
+			continueTerminalId?: string;
 		},
 		AgentRunResult
 	>(
@@ -620,12 +712,11 @@ async function runAgentOnHost(args: {
 			workspaceId: args.workspaceId,
 			agent: args.agent,
 			prompt: args.prompt,
+			// A host that predates this strips the unknown key and launches,
+			// which is exactly what every host did before it existed.
+			...(args.continueTerminalId
+				? { continueTerminalId: args.continueTerminalId }
+				: {}),
 		},
 	);
-}
-
-function describeError(err: unknown, context: string): string {
-	if (err instanceof RelayDispatchError) return `${context}: ${err.message}`;
-	if (err instanceof Error) return `${context}: ${err.message}`;
-	return `${context}: unknown error`;
 }

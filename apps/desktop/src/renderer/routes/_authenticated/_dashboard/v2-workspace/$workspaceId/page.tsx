@@ -6,17 +6,15 @@ import { useFeatureFlagEnabled } from "posthog-js/react";
 import { useCallback, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuickOpenStore } from "renderer/commandPalette/ui/QuickOpen/quickOpenStore";
-import { ZoomStable } from "renderer/components/ZoomStable";
 import { useWorkspaceHostTarget } from "renderer/hooks/host-service/useWorkspaceHostUrl";
 import { useV2UserPreferences } from "renderer/hooks/useV2UserPreferences";
-import { useZoomFactor } from "renderer/hooks/useZoomFactor";
 import { useHotkey } from "renderer/hotkeys";
 import { electronTrpc } from "renderer/lib/electron-trpc";
-import { NavigationControls } from "renderer/routes/_authenticated/_dashboard/components/NavigationControls";
-import { SidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/SidebarToggle";
-import { RightSidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/TopBar/components/RightSidebarToggle";
-import { TopBarPortsDropdown } from "renderer/routes/_authenticated/_dashboard/components/TopBar/components/TopBarPortsDropdown";
-import { WindowControls } from "renderer/routes/_authenticated/_dashboard/components/TopBar/components/WindowControls";
+import { reportRendererError } from "renderer/lib/report-renderer-error";
+import { RightSidebarToggle } from "renderer/routes/_authenticated/_dashboard/components/RightSidebarToggle";
+import { StateScreenShell } from "renderer/routes/_authenticated/_dashboard/components/StateScreenShell";
+import { WindowChrome } from "renderer/routes/_authenticated/_dashboard/components/WindowChrome";
+import { WindowControlsInset } from "renderer/routes/_authenticated/_dashboard/components/WindowControlsInset";
 import {
 	parseSubagentSearch,
 	readSubagentSearch,
@@ -24,23 +22,21 @@ import {
 import { CommandPalette } from "renderer/screens/main/components/CommandPalette";
 import { ResizablePanel } from "renderer/screens/main/components/ResizablePanel";
 import { getV2NotificationSourcesForTab } from "renderer/stores/v2-notifications";
-import {
-	COLLAPSED_WORKSPACE_SIDEBAR_WIDTH,
-	useWorkspaceSidebarStore,
-} from "renderer/stores/workspace-sidebar-state";
 import { useStore } from "zustand";
-import { StateScreenShell } from "../components/StateScreenShell";
 import { useWorkspace } from "../providers/WorkspaceProvider";
 import { AddTabMenu } from "./components/AddTabMenu";
 import { BackgroundTerminalsButton } from "./components/BackgroundTerminalsButton";
 import { ChangesControl } from "./components/ChangesControl";
+import { CloudWorkspaceTabBarControls } from "./components/CloudWorkspaceTabBarControls";
 import { V2NotificationStatusIndicator } from "./components/V2NotificationStatusIndicator";
 import { V2PresetsBar } from "./components/V2PresetsBar";
 import { V2WorkspaceOpenInButton } from "./components/V2WorkspaceOpenInButton";
 import { V2WorkspaceRunButton } from "./components/V2WorkspaceRunButton";
 import { WorkspaceEmptyState } from "./components/WorkspaceEmptyState";
 import { WorkspaceMissingWorktreeState } from "./components/WorkspaceMissingWorktreeState";
+import { WorkspacePagesMenu } from "./components/WorkspacePagesMenu";
 import { WorkspaceSidebar } from "./components/WorkspaceSidebar";
+import { useAgentSessionLauncher } from "./hooks/useAgentSessionLauncher";
 import { useAutoAdoptBackgroundSessions } from "./hooks/useAutoAdoptBackgroundSessions";
 import { useClearActivePaneAttention } from "./hooks/useClearActivePaneAttention";
 import { useConsumeAutomationRunLink } from "./hooks/useConsumeAutomationRunLink";
@@ -50,10 +46,10 @@ import { useCreatePendingMigratedTerminals } from "./hooks/useCreatePendingMigra
 import { useDefaultContextMenuActions } from "./hooks/useDefaultContextMenuActions";
 import { useDefaultPaneActions } from "./hooks/useDefaultPaneActions";
 import { useDiffPaneTarget } from "./hooks/useDiffPaneTarget";
-import { usePagePaneIntentOpener } from "./hooks/usePagePaneIntentOpener";
 import { usePaneRegistry } from "./hooks/usePaneRegistry";
 import { renderBrowserTabIcon } from "./hooks/usePaneRegistry/components/BrowserPane";
 import { usePullRequestPaneIntentOpener } from "./hooks/usePullRequestPaneIntentOpener";
+import { useRunPendingChatHandoff } from "./hooks/useRunPendingChatHandoff";
 import { useRunWorkspaceCreationPresets } from "./hooks/useRunWorkspaceCreationPresets";
 import { useShellInteractionPassthrough } from "./hooks/useShellInteractionPassthrough";
 import { useSlotElement } from "./hooks/useSlotElement";
@@ -67,7 +63,7 @@ import { useWorkspaceHotkeys } from "./hooks/useWorkspaceHotkeys";
 import { useWorkspacePaneOpeners } from "./hooks/useWorkspacePaneOpeners";
 import { WorkspaceGitStatusProvider } from "./providers/WorkspaceGitStatusProvider";
 import { FileDocumentStoreProvider } from "./state/fileDocumentStore";
-import type { PaneViewerData } from "./types";
+import type { ConsumeSearch, PaneViewerData } from "./types";
 import { findVisibleChangesPane } from "./utils/openChangesPaneInStore";
 import type { V2WorkspaceUrlOpenTarget } from "./utils/openUrlInV2Workspace";
 
@@ -152,6 +148,20 @@ function V2WorkspaceContent() {
 	} = Route.useSearch();
 	const { workspace } = useWorkspace();
 	const workspaceId = workspace.id;
+	const navigate = Route.useNavigate();
+	const consumeSearch = useCallback<ConsumeSearch>(
+		(keys) => {
+			void navigate({
+				search: (prev) => ({
+					...prev,
+					...Object.fromEntries(keys.map((key) => [key, undefined])),
+					focusRequestId: undefined,
+				}),
+				replace: true,
+			});
+		},
+		[navigate],
+	);
 
 	const {
 		preferences: v2UserPreferences,
@@ -164,6 +174,8 @@ function V2WorkspaceContent() {
 	const { store, isLayoutReady } = useV2WorkspacePaneLayout();
 	useClearActivePaneAttention({ store });
 	const launcher = useV2TerminalLauncher();
+	const { createNewAgentSession, openAgentChat, focusAgentTerminal } =
+		useAgentSessionLauncher({ workspaceId, store });
 	const {
 		matchedPresets,
 		newTabPresets,
@@ -172,6 +184,7 @@ function V2WorkspaceContent() {
 	} = useV2PresetExecution({
 		store,
 		launcher,
+		openAgentChat,
 	});
 	const workspaceRun = useV2WorkspaceRun({
 		store,
@@ -184,6 +197,7 @@ function V2WorkspaceContent() {
 		workspaceId,
 		terminalId,
 		focusRequestId,
+		consumeSearch,
 	});
 	const subagentLink = useMemo(
 		() =>
@@ -200,6 +214,7 @@ function V2WorkspaceContent() {
 		isLayoutReady,
 		link: subagentLink,
 		focusRequestId,
+		consumeSearch,
 	});
 	useCreatePendingMigratedTerminals({ workspaceId, isLayoutReady });
 	useRunWorkspaceCreationPresets({
@@ -214,6 +229,7 @@ function V2WorkspaceContent() {
 		url: openUrl,
 		target: openUrlTarget,
 		requestId: openUrlRequestId,
+		consumeSearch,
 	});
 
 	const {
@@ -246,6 +262,8 @@ function V2WorkspaceContent() {
 		setRightSidebarOpen,
 	});
 	const paneRegistry = usePaneRegistry({
+		onOpenDiff: openDiffPane,
+		onOpenComment: openCommentPane,
 		onOpenFile: openFilePaneFromTreeClick,
 		onRevealPath: revealPath,
 		launcher,
@@ -261,7 +279,6 @@ function V2WorkspaceContent() {
 		(state) => findVisibleChangesPane(state) != null,
 	);
 
-	usePagePaneIntentOpener({ workspaceId, isLayoutReady, openPagePane });
 	usePullRequestPaneIntentOpener({
 		workspaceId,
 		isLayoutReady,
@@ -276,6 +293,11 @@ function V2WorkspaceContent() {
 		});
 	}, [store]);
 	const isChatV3Enabled = useFeatureFlagEnabled(FEATURE_FLAGS.CHAT_V3) ?? false;
+	useRunPendingChatHandoff({
+		workspaceId,
+		isLayoutReady,
+		createNewAgentSession,
+	});
 
 	const quickOpenOpen = useQuickOpenStore(
 		(s) => s.open && s.target?.workspaceId === workspaceId,
@@ -302,7 +324,7 @@ function V2WorkspaceContent() {
 		[openFilePaneFromTreeClick, setRightSidebarOpen],
 	);
 	const defaultPaneActions = useDefaultPaneActions({ launcher });
-	const onBeforeCloseTab = useTabCloseGuard();
+	const onBeforeCloseTab = useTabCloseGuard(store);
 
 	// Fallback for rows persisted before the rightSidebarWidth field existed —
 	// the live collection skips zod defaults, so an older row reads undefined
@@ -342,14 +364,6 @@ function V2WorkspaceContent() {
 	const { data: platform } = electronTrpc.window.getPlatform.useQuery();
 	// Default to Mac while loading so window controls don't flash in.
 	const isMac = platform === undefined || platform === "darwin";
-	const zoomFactor = useZoomFactor();
-	const isSidebarPanelOpen = useWorkspaceSidebarStore((s) => s.isOpen);
-	const isSidebarPanelCollapsed = useWorkspaceSidebarStore((s) =>
-		s.isCollapsed(),
-	);
-	// With the sidebar collapsed the TopBar is hidden, so the tab bar hosts the
-	// traffic-light overhang past the rail plus the sidebar/nav controls.
-	const tabBarHostsChrome = isSidebarPanelOpen && isSidebarPanelCollapsed;
 
 	const workspaceRunButton = (
 		<V2WorkspaceRunButton
@@ -363,8 +377,17 @@ function V2WorkspaceContent() {
 		/>
 	);
 
+	const pagesMenu = (
+		<WorkspacePagesMenu
+			workspaceId={workspaceId}
+			onOpenPage={openPagePane}
+			onCreateNewAgentSession={createNewAgentSession}
+			onFocusAgentTerminal={focusAgentTerminal}
+		/>
+	);
+
 	return (
-		<FileDocumentStoreProvider>
+		<FileDocumentStoreProvider store={store}>
 			<WorkspaceGitStatusProvider workspaceId={workspaceId}>
 				<div className="flex min-h-0 min-w-0 flex-1">
 					<div
@@ -376,6 +399,7 @@ function V2WorkspaceContent() {
 							registry={paneRegistry}
 							paneActions={defaultPaneActions}
 							contextMenuActions={defaultContextMenuActions}
+							onPaneError={reportRendererError}
 							renderTabIcon={renderBrowserTabIcon}
 							renderTabAccessory={(tab) => (
 								<V2NotificationStatusIndicator
@@ -403,39 +427,10 @@ function V2WorkspaceContent() {
 									onToggleShowPresetsBar={setShowPresetsBar}
 								/>
 							)}
-							renderTabBarLeading={
-								tabBarHostsChrome
-									? () => (
-											<div className="flex h-full items-center">
-												{isMac && (
-													<div
-														className="drag h-full shrink-0"
-														style={{
-															width: `${Math.max(
-																80 / zoomFactor -
-																	COLLAPSED_WORKSPACE_SIDEBAR_WIDTH,
-																0,
-															)}px`,
-														}}
-													/>
-												)}
-												<ZoomStable
-													enabled={isMac}
-													className="flex items-center gap-1.5 px-1"
-												>
-													<SidebarToggle />
-													<NavigationControls />
-												</ZoomStable>
-											</div>
-										)
-									: undefined
-							}
+							renderTabBarLeading={() => <WindowChrome />}
 							renderTabBarTrailing={() => (
 								<div className="flex items-center gap-1">
-									{/* The expanded sidebar's header owns the ports pill; the
-									    tab bar only hosts it for the collapsed rail, where
-									    neither the header cluster nor the TopBar is visible. */}
-									{tabBarHostsChrome && <TopBarPortsDropdown />}
+									<CloudWorkspaceTabBarControls workspaceId={workspaceId} />
 									{/* Until the pane layout hydrates, tabs read as empty and
 									    every running terminal miscounts as "background", so the
 									    button would flash a bogus count on navigation. */}
@@ -459,7 +454,7 @@ function V2WorkspaceContent() {
 									    stays hidden, which keeps it compact for the tab bar. */}
 									<V2WorkspaceOpenInButton workspaceId={workspaceId} />
 									<RightSidebarToggle />
-									{!isMac && <WindowControls />}
+									{!isMac && !sidebarOpen && <WindowControlsInset />}
 								</div>
 							)}
 							renderEmptyState={() => (
@@ -493,6 +488,7 @@ function V2WorkspaceContent() {
 							<WorkspaceSidebar
 								workspaceId={workspaceId}
 								runButton={workspaceRunButton}
+								pagesMenu={pagesMenu}
 								onSelectFile={openFilePaneFromTreeClick}
 								onSelectDiffFile={openDiffPane}
 								onOpenComment={openCommentPane}

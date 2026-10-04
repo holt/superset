@@ -9,7 +9,7 @@ export const FIRST_PARTY_MANIFESTS = {
 	"github": {
 		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
 		"name": "github",
-		"version": "1.0.0",
+		"version": "1.0.1",
 		"description": "Work with issues, pull requests, and CI across your repositories.",
 		"author": {
 			"name": "Superset",
@@ -32,41 +32,9 @@ export const FIRST_PARTY_MANIFESTS = {
 					"category": "Developer tools",
 					"icon": "github"
 				},
-				"auth": [
-					{
-						"type": "oauth2",
-						"provider": "github",
-						"authorization_url": "https://github.com/login/oauth/authorize",
-						"token_url": "https://github.com/login/oauth/access_token",
-						"scopes": [
-							"repo",
-							"read:org",
-							"workflow"
-						],
-						"scope_separator": " ",
-						"token_request_auth_method": "client_secret_post",
-						"requires_env": [
-							"PLUGIN_GITHUB_CLIENT_ID",
-							"PLUGIN_GITHUB_CLIENT_SECRET"
-						],
-						"identity": {
-							"url": "https://api.github.com/user",
-							"method": "GET",
-							"headers": {
-								"Authorization": "Bearer ${config.access_token}",
-								"Accept": "application/vnd.github+json"
-							},
-							"id": "$.id",
-							"label": "$.login"
-						},
-						"label": "OAuth 2.0",
-						"bind": {
-							"headers": {
-								"Authorization": "Bearer ${config.access_token}"
-							}
-						}
-					}
-				],
+				"connector": {
+					"slug": "github"
+				},
 				"mcp": {
 					"type": "streamable-http",
 					"url": "https://api.githubcopilot.com/mcp/"
@@ -87,7 +55,7 @@ export const FIRST_PARTY_MANIFESTS = {
 	"linear": {
 		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
 		"name": "linear",
-		"version": "1.4.0",
+		"version": "1.5.3",
 		"description": "Plan and build products: create, search, and update Linear issues.",
 		"author": {
 			"name": "Superset",
@@ -109,78 +77,9 @@ export const FIRST_PARTY_MANIFESTS = {
 					"category": "Productivity",
 					"icon": "linear"
 				},
-				"auth": [
-					{
-						"type": "oauth2",
-						"label": "OAuth 2.0",
-						"provider": "linear",
-						"authorization_url": "https://linear.app/oauth/authorize",
-						"token_url": "https://api.linear.app/oauth/token",
-						"scopes": [
-							"read",
-							"write",
-							"issues:create"
-						],
-						"scope_separator": ",",
-						"token_request_auth_method": "client_secret_post",
-						"token_expiration_buffer": 300,
-						"requires_env": [
-							"PLUGIN_LINEAR_CLIENT_ID",
-							"PLUGIN_LINEAR_CLIENT_SECRET"
-						],
-						"identity": {
-							"url": "https://api.linear.app/graphql",
-							"method": "POST",
-							"headers": {
-								"Authorization": "Bearer ${config.access_token}",
-								"Content-Type": "application/json"
-							},
-							"body": {
-								"query": "query { viewer { id name organization { id name } } }"
-							},
-							"id": "$.data.viewer.organization.id",
-							"label": "$.data.viewer.organization.name"
-						},
-						"bind": {
-							"headers": {
-								"Authorization": "Bearer ${config.access_token}"
-							}
-						}
-					},
-					{
-						"type": "api_key",
-						"label": "Personal API key",
-						"credential_input": "api_key",
-						"inputs": [
-							{
-								"name": "api_key",
-								"label": "Linear API key",
-								"placeholder": "lin_api_…",
-								"description": "Linear → Settings → Security & access → Personal API keys",
-								"required": true,
-								"secret": true
-							}
-						],
-						"identity": {
-							"url": "https://api.linear.app/graphql",
-							"method": "POST",
-							"headers": {
-								"Authorization": "${config.access_token}",
-								"Content-Type": "application/json"
-							},
-							"body": {
-								"query": "query { viewer { id name organization { id name } } }"
-							},
-							"id": "$.data.viewer.organization.id",
-							"label": "$.data.viewer.organization.name"
-						},
-						"bind": {
-							"headers": {
-								"Authorization": "Bearer ${config.access_token}"
-							}
-						}
-					}
-				],
+				"connector": {
+					"slug": "linear_mcp"
+				},
 				"mcp": {
 					"type": "streamable-http",
 					"url": "https://mcp.linear.app/mcp"
@@ -199,6 +98,397 @@ export const FIRST_PARTY_MANIFESTS = {
 			{
 				"name": "project-status",
 				"description": "Draft a Linear project status update from what actually moved — progress, risks, and the one decision that needs making. Use when someone asks for a project update, a status post, where a project stands, whether it will land on time, or what to tell stakeholders."
+			}
+		]
+	} as const,
+	"notion": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "notion",
+		"version": "1.0.3",
+		"description": "Search, read, and write your Notion workspace: pages, databases, and comments.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"notion",
+			"docs",
+			"notes",
+			"knowledge-base",
+			"wiki"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Notion",
+					"category": "Productivity",
+					"icon": "notion"
+				},
+				"connector": {
+					"slug": "notion_mcp"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://mcp.notion.com/mcp"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "find-in-notion",
+				"description": "Find what the workspace already says before you answer or write — search Notion, tell the canonical page from the stale copy, and cite what you used. Use when the user asks what's in Notion, refers to a doc, spec, or meeting note, or asks a question the workspace probably already answers."
+			},
+			{
+				"name": "write-to-notion",
+				"description": "Write a page into Notion that someone else can find and trust — pick the right parent, check for the page that already exists, and structure it for a reader who was not in this conversation. Use when the user says to write up, document, save, or capture something in Notion, or to update an existing page."
+			}
+		]
+	} as const,
+	"slack": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "slack",
+		"version": "1.2.3",
+		"description": "Search, read, and post across your Slack workspace: channels, DMs, and threads.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"slack",
+			"chat",
+			"messages",
+			"communication",
+			"search"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Slack",
+					"category": "Communication",
+					"icon": "slack"
+				},
+				"connector": {
+					"slug": "slack"
+				}
+			}
+		},
+		"skills": []
+	} as const,
+	"sentry": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "sentry",
+		"version": "1.0.0",
+		"description": "Debug with production error context: search issues, read stack traces, and manage alerts in Sentry.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"sentry",
+			"errors",
+			"monitoring",
+			"debugging",
+			"observability"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Sentry",
+					"category": "Developer tools",
+					"icon": "sentry"
+				},
+				"connector": {
+					"slug": "sentry_mcp"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://mcp.sentry.dev/mcp"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "debug-with-sentry",
+				"description": "Root-cause a production error with Sentry's evidence before touching code — pull the issue, read the stack trace and breadcrumbs, and separate the crash from its trigger. Use when the user pastes a Sentry link or issue ID, reports a production error, or asks why something is crashing for users."
+			},
+			{
+				"name": "find-in-sentry",
+				"description": "Answer \"what's breaking\" questions from Sentry — find the right org and project, search issues and events with the vocabulary Sentry uses, and report what is actually firing rather than the first hit. Use when the user asks what errors are happening, whether something is stable, what changed since a release, or for any health summary of a service."
+			}
+		]
+	} as const,
+	"gmail": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "gmail",
+		"version": "1.1.5",
+		"description": "Read, search, send, and organize mail in your Gmail account.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"gmail",
+			"email",
+			"mail",
+			"google",
+			"inbox"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Gmail",
+					"category": "Communication",
+					"icon": "gmail"
+				},
+				"connector": {
+					"slug": "google"
+				}
+			}
+		},
+		"skills": []
+	} as const,
+	"granola": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "granola",
+		"version": "1.0.0",
+		"description": "Recall what was said in your meetings: search, read, and query Granola notes and transcripts.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"granola",
+			"meetings",
+			"meeting-notes",
+			"transcripts",
+			"notes"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Granola",
+					"category": "Productivity",
+					"icon": "granola"
+				},
+				"connector": {
+					"slug": "granola_mcp"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://mcp.granola.ai/mcp"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "find-in-granola",
+				"description": "Answer \"what did we say, decide, or promise\" from Granola meeting notes — narrow to the meetings that can hold the answer, read the notes before the transcript, and cite the meeting behind every claim. Use when the user asks what happened in a meeting, what a customer or teammate said, what was decided or promised, or refers to a call, sync, standup, or demo."
+			},
+			{
+				"name": "follow-up-from-granola",
+				"description": "Turn a meeting into work — read its Granola notes, extract the commitments that belong to this user, and carry each one out or draft it (a code change, a ticket, a reply) with a trace back to the note. Use when the user says \"do the follow-ups from\", \"implement what we agreed\", \"make tickets from\", or points at a meeting after a sync, planning session, or customer call."
+			}
+		]
+	} as const,
+	"circleback": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "circleback",
+		"version": "1.0.0",
+		"description": "Meeting notes, action items, and transcripts from Circleback: search what was said and work what was captured.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"circleback",
+			"meetings",
+			"meeting-notes",
+			"action-items",
+			"transcripts"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Circleback",
+					"category": "Productivity",
+					"icon": "circleback"
+				},
+				"connector": {
+					"slug": "circleback_mcp"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://circleback.ai/api/mcp"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "find-in-circleback",
+				"description": "Answer \"what did we say, decide, or promise\" from Circleback meetings — search by attendee, company, tag, or date before keyword, read the notes before the transcript, and cite the meeting behind every claim. Use when the user asks what happened on a call, what a customer or teammate said, what was agreed, or refers to a meeting, sync, demo, or interview."
+			},
+			{
+				"name": "prep-with-circleback",
+				"description": "Build a brief for an upcoming meeting from Circleback — the calendar event, the history with the same people and company, open commitments on both sides, and what is still unresolved. Use when the user asks to prep for a call, \"what do I need to know before\", who someone is, or where things stand with a customer or partner."
+			},
+			{
+				"name": "work-circleback-action-items",
+				"description": "Work the action items Circleback captured — find what is assigned to this user, do the ones the workspace can do, and update status only for work that is actually finished. Use when the user asks what they owe, \"do my action items\", \"what's still open from\", or wants to close, reassign, or add an action item."
+			}
+		]
+	} as const,
+	"ynab": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "ynab",
+		"version": "1.0.0",
+		"description": "Track money in YNAB: accounts, categories, budgets, and transactions.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"ynab",
+			"budget",
+			"finance",
+			"money",
+			"transactions"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "YNAB",
+					"category": "Productivity",
+					"icon": "ynab"
+				},
+				"connector": {
+					"slug": "ynab"
+				}
+			}
+		},
+		"skills": []
+	} as const,
+	"stripe": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "stripe",
+		"version": "1.0.0",
+		"description": "Work with payments in Stripe: trace charges and subscriptions, read billing data, and search Stripe's docs.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"stripe",
+			"payments",
+			"billing",
+			"subscriptions",
+			"invoices"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Stripe",
+					"category": "Data & APIs",
+					"icon": "stripe"
+				},
+				"connector": {
+					"slug": "stripe"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://mcp.stripe.com"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "build-a-stripe-integration",
+				"description": "Write Stripe code against what the API does today — plan the product shape, confirm every parameter from Stripe's own docs and schemas, and keep the agent in a sandbox. Use when adding checkout, billing, subscriptions, invoicing, or webhooks to a codebase, or when debugging Stripe integration code that compiles but behaves wrong."
+			},
+			{
+				"name": "refund-and-dispute",
+				"description": "Move money back to a customer in Stripe, or respond to a dispute, with the checks that belong in front of an irreversible write — read the charge first, fix the exact amount, and clear Stripe's human confirmation step. Use when the user asks to refund a payment, cancel and refund a subscription, or handle a chargeback or dispute."
+			},
+			{
+				"name": "trace-a-payment",
+				"description": "Answer a question about money that already moved in Stripe — why a charge failed, what a customer was billed, where an invoice or payout stands — by reading the object chain instead of guessing from a dashboard total. Use when the user pastes a Stripe id, asks why a payment failed, asks what a customer is paying, or wants revenue, invoice, or subscription state."
+			}
+		]
+	} as const,
+	"superhuman": {
+		"$schema": "https://superset.sh/schemas/plugin/1.0.0.json",
+		"name": "superhuman",
+		"version": "1.0.0",
+		"description": "Work your inbox from Superhuman: find and read threads, triage what needs you, draft replies in your voice, and schedule from your calendar.",
+		"author": {
+			"name": "Superset",
+			"url": "https://superset.sh"
+		},
+		"homepage": "https://docs.superset.sh",
+		"repository": "https://github.com/superset-sh/superset",
+		"license": "MIT",
+		"keywords": [
+			"superhuman",
+			"email",
+			"mail",
+			"inbox",
+			"calendar"
+		],
+		"extensions": {
+			"superset": {
+				"interface": {
+					"displayName": "Superhuman",
+					"category": "Communication",
+					"icon": "superhuman"
+				},
+				"connector": {
+					"slug": "superhuman_mcp"
+				},
+				"mcp": {
+					"type": "streamable-http",
+					"url": "https://mcp.mail.superhuman.com/mcp"
+				}
+			}
+		},
+		"skills": [
+			{
+				"name": "find-in-superhuman",
+				"description": "Find and read mail in Superhuman — the thread where something was said, sent, or promised — by filtering on who, when, and which split before searching by words, reading the thread before answering, and linking the thread behind every claim. Use when the user asks what someone emailed, whether a reply or an invoice ever arrived, what the latest is on a thread, or what is on their calendar."
+			},
+			{
+				"name": "reply-from-superhuman",
+				"description": "Draft a reply, a follow-up, or a new email in Superhuman in the user's own voice — read the whole thread first, reuse an existing draft instead of adding a second one, keep the right people on the thread, and leave sending to the user unless they asked for it. Use when the user says reply to, answer, follow up with, draft an email to, or send, or when a triage turned up threads that need a response."
+			},
+			{
+				"name": "schedule-with-superhuman",
+				"description": "Find a time and put a meeting on the calendar through Superhuman — read what is already booked, check the participants' availability, propose slots, and create the event only once the user picks one. Use when the user asks what is on their calendar, when they are free, to find a time with someone, or to schedule, move, or set up a call."
+			},
+			{
+				"name": "triage-superhuman-inbox",
+				"description": "Work through a Superhuman inbox — sort what is there into needs a reply, waiting on someone else, worth knowing, and noise, then archive, star, label, remind, or unsubscribe only as the user directs. Use when the user asks what needs their attention, what they are waiting on, to triage or clean up their inbox, or to deal with newsletters and notifications."
 			}
 		]
 	} as const,

@@ -1,4 +1,4 @@
-import type { ComponentType, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { StoreApi } from "zustand/vanilla";
 import type { CreatePaneInput, WorkspaceStore } from "../core/store";
 import type { Pane, Tab } from "../types";
@@ -57,9 +57,7 @@ export interface RendererContext<TData> {
 		) => void;
 	};
 
-	components: {
-		PaneHeaderActions: ComponentType;
-	};
+	headerActions: ReactNode;
 }
 
 export interface PaneTitleSource {
@@ -82,7 +80,8 @@ export interface PaneDefinition<TData> {
 	renderToolbar?(context: RendererContext<TData>): ReactNode;
 	onHeaderClick?(context: RendererContext<TData>): void;
 	onBeforeClose?(pane: Pane<TData>): boolean | Promise<boolean>;
-	onAfterClose?(pane: Pane<TData>): void;
+	onAfterClose?(pane: Pane<TData>, closedPanes: readonly Pane<TData>[]): void;
+	onAfterRemove?(pane: Pane<TData>): void;
 	paneActions?:
 		| PaneActionConfig<TData>[]
 		| ((
@@ -98,6 +97,11 @@ export interface PaneDefinition<TData> {
 }
 
 export type PaneRegistry<TData> = Record<string, PaneDefinition<TData>>;
+
+export type PaneErrorHandler = (
+	error: unknown,
+	componentStack: string | null,
+) => void;
 
 export interface WorkspaceInteractionState {
 	resizeActive: boolean;
@@ -129,4 +133,5 @@ export interface WorkspaceProps<TData> {
 	contextMenuActions?:
 		| ContextMenuActionConfig<TData>[]
 		| ((context: RendererContext<TData>) => ContextMenuActionConfig<TData>[]);
+	onPaneError?: PaneErrorHandler;
 }
