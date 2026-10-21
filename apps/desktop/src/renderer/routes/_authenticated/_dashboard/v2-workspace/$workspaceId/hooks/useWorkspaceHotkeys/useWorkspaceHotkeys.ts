@@ -1,3 +1,4 @@
+import type { CreatePaneInput } from "@superset/panes";
 import {
 	type FocusDirection,
 	getPaneParentDirection,
@@ -7,8 +8,8 @@ import {
 	type WorkspaceStore,
 } from "@superset/panes";
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { useV2UserPreferences } from "renderer/hooks/useV2UserPreferences";
 import { useHotkey } from "renderer/hotkeys";
+import { useWorkspace } from "renderer/routes/_authenticated/_dashboard/v2-workspace/providers/WorkspaceProvider";
 import type { V2TerminalPresetRow } from "renderer/routes/_authenticated/providers/CollectionsProvider/dashboardSidebarLocal";
 import { useRightSidebarToggleIntent } from "renderer/stores/right-sidebar-toggle-intent";
 import type { StoreApi } from "zustand";
@@ -16,24 +17,28 @@ import type {
 	BrowserPaneData,
 	DesktopPaneData,
 	MobilePaneData,
+	PaneTarget,
 	PaneViewerData,
 	TerminalPaneData,
 } from "../../types";
 import { useDefaultBrowserUrl } from "../useDefaultBrowserUrl";
 import type { TerminalLauncher } from "../useV2TerminalLauncher";
+import { useWorkspaceRightSidebarOpen } from "../useWorkspaceRightSidebarOpen";
 
 export function useWorkspaceHotkeys({
 	store,
+	viewer,
 	matchedPresets,
 	executePreset,
 	addTerminalTab,
 	openChangesPane,
 	paneRegistry,
 	launcher,
-	onBeforeCloseTab,
+	getCloseTarget,
 	isSandbox,
 }: {
 	store: StoreApi<WorkspaceStore<PaneViewerData>>;
+	viewer: PaneTarget;
 	matchedPresets: V2TerminalPresetRow[];
 	executePreset: (preset: V2TerminalPresetRow) => void | Promise<void>;
 	addTerminalTab: () => Promise<void>;
@@ -41,9 +46,15 @@ export function useWorkspaceHotkeys({
 	paneRegistry: PaneRegistry<PaneViewerData>;
 	launcher: TerminalLauncher;
 	isSandbox: boolean;
-	onBeforeCloseTab?: WorkspaceProps<PaneViewerData>["onBeforeCloseTab"];
+	getCloseTarget: () => {
+		store: StoreApi<WorkspaceStore<PaneViewerData>>;
+		onBeforeCloseTab?: WorkspaceProps<PaneViewerData>["onBeforeCloseTab"];
+	};
 }) {
-	const { setRightSidebarOpen } = useV2UserPreferences();
+	const { workspace } = useWorkspace();
+	const { setOpen: setRightSidebarOpen } = useWorkspaceRightSidebarOpen(
+		workspace.id,
+	);
 	const defaultBrowserUrl = useDefaultBrowserUrl();
 	const visiblePresets = useMemo(
 		() => matchedPresets.filter((preset) => preset.pinnedToBar !== false),
@@ -69,7 +80,8 @@ export function useWorkspaceHotkeys({
 	});
 
 	useHotkey("NEW_BROWSER", () => {
-		store.getState().addTab({
+		viewer.reveal();
+		viewer.store.getState().addTab({
 			panes: [
 				{
 					kind: "browser",
@@ -92,7 +104,7 @@ export function useWorkspaceHotkeys({
 		if (isClosingPaneRef.current) return;
 		isClosingPaneRef.current = true;
 		try {
-			const state = store.getState();
+			const state = getCloseTarget().store.getState();
 			const active = state.getActivePane();
 			if (!active) return;
 			const definition = paneRegistry[active.pane.kind];
@@ -111,7 +123,8 @@ export function useWorkspaceHotkeys({
 		if (isClosingTabRef.current) return;
 		isClosingTabRef.current = true;
 		try {
-			const state = store.getState();
+			const { store: targetStore, onBeforeCloseTab } = getCloseTarget();
+			const state = targetStore.getState();
 			const tab = state.getActiveTab();
 			if (!tab) return;
 			if (onBeforeCloseTab) {
@@ -258,9 +271,13 @@ export function useWorkspaceHotkeys({
 		});
 	});
 
-	useHotkey(
-		"SPLIT_WITH_DESKTOP",
-		() => {
+	const splitWithViewerPane = useCallback(
+		(newPane: CreatePaneInput<PaneViewerData>) => {
+			if (viewer.store !== store) {
+				viewer.reveal();
+				viewer.store.getState().openPane({ pane: newPane });
+				return;
+			}
 			const state = store.getState();
 			const active = state.getActivePane();
 			if (!active) return;
@@ -268,48 +285,37 @@ export function useWorkspaceHotkeys({
 				tabId: active.tabId,
 				paneId: active.pane.id,
 				position: "right",
-				newPane: {
-					kind: "desktop",
-					data: { kind: "desktop" } as DesktopPaneData,
-				},
+				newPane,
 			});
 		},
+		[store, viewer],
+	);
+
+	useHotkey(
+		"SPLIT_WITH_DESKTOP",
+		() =>
+			splitWithViewerPane({
+				kind: "desktop",
+				data: { kind: "desktop" } as DesktopPaneData,
+			}),
 		{ enabled: isSandbox },
 	);
 
 	// Not gated on isSandbox: a local machine with Xcode/Android SDK gets a
-	// mobile pane too, just backed by a local simulator instead of Limrun.
-	useHotkey("SPLIT_WITH_MOBILE", () => {
-		const state = store.getState();
-		const active = state.getActivePane();
-		if (!active) return;
-		state.splitPane({
-			tabId: active.tabId,
-			paneId: active.pane.id,
-			position: "right",
-			newPane: {
-				kind: "mobile",
-				data: { kind: "mobile" } as MobilePaneData,
-			},
-		});
-	});
+	// mobile pane too, backed by a local simulator.
+	useHotkey("SPLIT_WITH_MOBILE", () =>
+		splitWithViewerPane({
+			kind: "mobile",
+			data: { kind: "mobile" } as MobilePaneData,
+		}),
+	);
 
-	useHotkey("SPLIT_WITH_BROWSER", () => {
-		const state = store.getState();
-		const active = state.getActivePane();
-		if (!active) return;
-		state.splitPane({
-			tabId: active.tabId,
-			paneId: active.pane.id,
-			position: "right",
-			newPane: {
-				kind: "browser",
-				data: {
-					url: defaultBrowserUrl,
-				} as BrowserPaneData,
-			},
-		});
-	});
+	useHotkey("SPLIT_WITH_BROWSER", () =>
+		splitWithViewerPane({
+			kind: "browser",
+			data: { url: defaultBrowserUrl } as BrowserPaneData,
+		}),
+	);
 
 	useHotkey("EQUALIZE_PANE_SPLITS", () => {
 		const state = store.getState();

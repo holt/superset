@@ -2,14 +2,21 @@ import {
 	cancelTurnInputSchema,
 	closeSessionInputSchema,
 	createSessionInputSchema,
+	discoverSessionsInputSchema,
 	forkSessionInputSchema,
+	getItemBodiesInputSchema,
 	getItemsInputSchema,
+	getOutlineInputSchema,
 	getSessionInputSchema,
 	listSessionsInputSchema,
 	promptInputSchema,
+	queuedPromptInputSchema,
 	respondToApprovalInputSchema,
+	resumeQueueInputSchema,
+	rewindSessionInputSchema,
 	setConfigOptionInputSchema,
 	setModeInputSchema,
+	stopBackgroundTaskInputSchema,
 } from "@superset/chat/protocol";
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { initTRPC, TRPCError } from "@trpc/server";
@@ -26,6 +33,7 @@ export type ChatRouterOptions = {
 
 const UNKNOWN_HARNESS = /^unknown harness /;
 const NOT_RUNNING = /^chat session (.+) is not running$/;
+const NOT_QUEUED = /^prompt .+ is not queued$/;
 
 function mapCommandError(runtime: ChatRuntime, error: unknown): unknown {
 	if (error instanceof TRPCError) return error;
@@ -33,6 +41,13 @@ function mapCommandError(runtime: ChatRuntime, error: unknown): unknown {
 	if (UNKNOWN_HARNESS.test(error.message)) {
 		return new TRPCError({
 			code: "BAD_REQUEST",
+			message: error.message,
+			cause: error,
+		});
+	}
+	if (NOT_QUEUED.test(error.message)) {
+		return new TRPCError({
+			code: "NOT_FOUND",
 			message: error.message,
 			cause: error,
 		});
@@ -54,7 +69,13 @@ export function createChatRouter(
 ) {
 	function guarded<T>(execute: () => T): T {
 		try {
-			return execute();
+			const result = execute();
+			if (result instanceof Promise) {
+				return result.catch((error: unknown) => {
+					throw mapCommandError(runtime, error);
+				}) as T;
+			}
+			return result;
 		} catch (error) {
 			throw mapCommandError(runtime, error);
 		}
@@ -79,10 +100,34 @@ export function createChatRouter(
 			.input(promptInputSchema)
 			.mutation(({ input }) => guarded(() => runtime.commands.prompt(input))),
 
+		removeQueuedPrompt: t.procedure
+			.input(queuedPromptInputSchema)
+			.mutation(({ input }) =>
+				guarded(() => runtime.commands.removeQueuedPrompt(input)),
+			),
+
+		steerQueuedPrompt: t.procedure
+			.input(queuedPromptInputSchema)
+			.mutation(({ input }) =>
+				guarded(() => runtime.commands.steerQueuedPrompt(input)),
+			),
+
+		resumeQueue: t.procedure
+			.input(resumeQueueInputSchema)
+			.mutation(({ input }) =>
+				guarded(() => runtime.commands.resumeQueue(input)),
+			),
+
 		cancelTurn: t.procedure
 			.input(cancelTurnInputSchema)
 			.mutation(({ input }) =>
 				guarded(() => runtime.commands.cancelTurn(input)),
+			),
+
+		stopBackgroundTask: t.procedure
+			.input(stopBackgroundTaskInputSchema)
+			.mutation(({ input }) =>
+				guarded(() => runtime.commands.stopBackgroundTask(input)),
 			),
 
 		respondToApproval: t.procedure
@@ -109,6 +154,16 @@ export function createChatRouter(
 				return guarded(() => runtime.commands.forkSession({ ...rest, cwd }));
 			}),
 
+		rewindSession: t.procedure
+			.input(
+				rewindSessionInputSchema.extend({ workspaceId: z.string().min(1) }),
+			)
+			.mutation(async ({ input }) => {
+				const { workspaceId, ...rest } = input;
+				const cwd = await options.resolveCwd(workspaceId);
+				return guarded(() => runtime.commands.rewindSession({ ...rest, cwd }));
+			}),
+
 		closeSession: t.procedure
 			.input(closeSessionInputSchema)
 			.mutation(({ input }) => runtime.commands.closeSession(input)),
@@ -116,6 +171,10 @@ export function createChatRouter(
 		getSession: t.procedure
 			.input(getSessionInputSchema)
 			.query(({ input }) => runtime.commands.getSession(input)),
+
+		getQueue: t.procedure
+			.input(getSessionInputSchema)
+			.query(({ input }) => runtime.commands.getQueue(input)),
 
 		listSessions: t.procedure
 			.input(listSessionsInputSchema)
@@ -128,9 +187,33 @@ export function createChatRouter(
 				}),
 			),
 
+		discoverSessions: t.procedure
+			.input(discoverSessionsInputSchema)
+			.query(async ({ input }) => {
+				const cwd = await options.resolveCwd(input.workspaceId);
+				try {
+					return await runtime.commands.discoverSessions({
+						harness: input.harness,
+						scopeId: input.workspaceId,
+						cwd,
+						...(input.cursor ? { cursor: input.cursor } : {}),
+					});
+				} catch (error) {
+					throw mapCommandError(runtime, error);
+				}
+			}),
+
 		getItems: t.procedure
 			.input(getItemsInputSchema)
 			.query(({ input }) => runtime.commands.getItems(input)),
+
+		getOutline: t.procedure
+			.input(getOutlineInputSchema)
+			.query(({ input }) => runtime.commands.getOutline(input)),
+
+		getItemBodies: t.procedure
+			.input(getItemBodiesInputSchema)
+			.query(({ input }) => runtime.commands.getItemBodies(input)),
 	});
 }
 

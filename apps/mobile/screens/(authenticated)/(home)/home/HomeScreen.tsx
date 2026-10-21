@@ -1,5 +1,6 @@
 import { LegendList } from "@legendapp/list/react-native";
 import { useLingui } from "@lingui/react/macro";
+import { ForwardSwipe } from "@superset/forward-swipe";
 import { i18n } from "@superset/i18n";
 import { useFormat } from "@superset/i18n/react";
 import { groupCloudWorkspacesByTime } from "@superset/shared/cloud-workspace-groups";
@@ -15,6 +16,7 @@ import { useFeatureFlag } from "posthog-react-native";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
 	ActivityIndicator,
+	Alert,
 	RefreshControl,
 	ScrollView,
 	useWindowDimensions,
@@ -37,6 +39,9 @@ import {
 import { useOrgHosts } from "@/hooks/useOrgHosts";
 import { useReadableInset } from "@/hooks/useReadableInset";
 import { useSession } from "@/lib/auth/client";
+import { errorCopy } from "@/lib/errors";
+import { useVoiceSession } from "@/lib/voice/useVoiceSession";
+import { useVoiceActive } from "@/lib/voice/voiceStore";
 import { useCloudFilters } from "@/screens/(authenticated)/(home)/hooks/useCloudFilters";
 import { useSelectedHost } from "@/screens/(authenticated)/(home)/hooks/useSelectedHost";
 import { useWorkspaceScope } from "@/screens/(authenticated)/(home)/hooks/useWorkspaceScope";
@@ -46,6 +51,7 @@ import {
 	type OrgPullRequest,
 	usePullRequests,
 } from "@/screens/(authenticated)/hooks/usePullRequests";
+import { useLastWorkspaceStore } from "@/screens/(authenticated)/stores/lastWorkspaceStore";
 import { usePinnedWorkspacesStore } from "@/screens/(authenticated)/stores/pinnedWorkspacesStore";
 import { pullRequestStatus } from "@/screens/(authenticated)/workspace/[id]/utils/pullRequest";
 import { CloudWorkspaceRow as CloudWorkspaceListRow } from "./components/CloudWorkspaceRow";
@@ -147,6 +153,9 @@ const NOTICE_MS = 1500;
 export function HomeScreen() {
 	const { t } = useLingui();
 	const router = useRouter();
+	const voice = useVoiceSession();
+	const voiceActive = useVoiceActive();
+	const voiceEnabled = Boolean(useFeatureFlag(FEATURE_FLAGS.MOBILE_VOICE_MODE));
 	const sort = useWorkspacesFilterStore((store) => store.sort);
 	const hasHydrated = useWorkspacesFilterStore((store) => store.hasHydrated);
 	const [visibleIds, setVisibleIds] = useState<string[]>([]);
@@ -182,6 +191,7 @@ export function HomeScreen() {
 
 	const selectedHost = useSelectedHost();
 	const pinnedAt = usePinnedWorkspacesStore((state) => state.pinnedAt);
+	const lastWorkspaceId = useLastWorkspaceStore((state) => state.workspaceId);
 	const {
 		workspaces,
 		isReady: workspacesReady,
@@ -705,6 +715,14 @@ export function HomeScreen() {
 
 	return (
 		<>
+			<ForwardSwipe
+				enabled={lastWorkspaceId !== null}
+				onSwipeBegin={() => {
+					if (lastWorkspaceId) {
+						router.push(`/(authenticated)/workspace/${lastWorkspaceId}`);
+					}
+				}}
+			/>
 			<OrganizationHeaderButton
 				isLoading={isLoadingOrganizations}
 				name={activeOrganization?.name}
@@ -734,9 +752,27 @@ export function HomeScreen() {
 						: undefined,
 				}}
 			/>
-			{selectedHost && hostOffline ? null : (
+			{selectedHost && hostOffline && !voiceEnabled ? null : (
 				<Stack.Toolbar placement="right">
+					{voiceEnabled ? (
+						<Stack.Toolbar.Button
+							icon="waveform"
+							accessibilityLabel={t({ message: "Start voice mode" })}
+							onPress={() => {
+								void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+								void voice
+									.start()
+									.catch((error: unknown) =>
+										Alert.alert(
+											t({ message: "Couldn't start voice mode" }),
+											errorCopy(error),
+										),
+									);
+							}}
+						/>
+					) : null}
 					<Stack.Toolbar.Button
+						hidden={Boolean(selectedHost && hostOffline)}
 						icon="magnifyingglass"
 						accessibilityLabel={t({
 							message: "Search workspaces",
@@ -830,7 +866,7 @@ export function HomeScreen() {
 			{/* Cloud rows included: the row's "+" targets a workspace by id, and
 			    the composer has to find a sandbox workspace as readily as a
 			    machine's to start an agent in it. */}
-			<NewChatWidget workspaces={composerWorkspaces} />
+			{voiceActive ? null : <NewChatWidget workspaces={composerWorkspaces} />}
 		</>
 	);
 }

@@ -7,6 +7,9 @@ const commandBaseFields = {
 	sessionId: z.string().min(1),
 };
 
+/** A start `modeId` asking for no harness default: the agent opens in its own mode. */
+export const AGENT_DEFAULT_MODE = "agent-default";
+
 export const createSessionInputSchema = z.object({
 	commandId: z.uuid(),
 	workspaceId: z.string().min(1),
@@ -14,6 +17,7 @@ export const createSessionInputSchema = z.object({
 	modeId: z.string().optional(),
 	modelId: z.string().optional(),
 	resume: z.object({ harnessSessionId: z.string().min(1) }).optional(),
+	terminalId: z.string().min(1).optional(),
 });
 export type CreateSessionInput = z.infer<typeof createSessionInputSchema>;
 
@@ -21,6 +25,7 @@ export const promptInputSchema = z.object({
 	...commandBaseFields,
 	clientId: z.string().min(1),
 	content: z.array(userContentSchema).min(1),
+	steer: z.object({ expectedTurnId: z.string().min(1) }).optional(),
 });
 export type PromptInput = z.infer<typeof promptInputSchema>;
 
@@ -31,11 +36,29 @@ export const steerInputSchema = z.object({
 });
 export type SteerInput = z.infer<typeof steerInputSchema>;
 
+export const queuedPromptInputSchema = z.object({
+	...commandBaseFields,
+	itemId: z.string().min(1),
+});
+export type QueuedPromptInput = z.infer<typeof queuedPromptInputSchema>;
+
+export const resumeQueueInputSchema = z.object(commandBaseFields);
+export type ResumeQueueInput = z.infer<typeof resumeQueueInputSchema>;
+
 export const cancelTurnInputSchema = z.object({
 	...commandBaseFields,
 	turnId: z.string().min(1),
+	pauseQueue: z.boolean().optional(),
 });
 export type CancelTurnInput = z.infer<typeof cancelTurnInputSchema>;
+
+export const stopBackgroundTaskInputSchema = z.object({
+	...commandBaseFields,
+	taskId: z.string().min(1),
+});
+export type StopBackgroundTaskInput = z.infer<
+	typeof stopBackgroundTaskInputSchema
+>;
 
 export const respondToApprovalInputSchema = z.object({
 	...commandBaseFields,
@@ -73,6 +96,21 @@ export const forkSessionInputSchema = z.object({
 export type ForkSessionInput = z.infer<typeof forkSessionInputSchema>;
 
 /**
+ * Opens a new session holding the conversation before `itemId` and sends
+ * `prompt` there. An agent that cannot fork at that message also gets
+ * `handoffPrompt`, as a hidden part of the same prompt.
+ */
+export const rewindSessionInputSchema = z.object({
+	...commandBaseFields,
+	itemId: z.string().min(1),
+	prompt: z.string().min(1),
+	handoffPrompt: z.string().min(1).optional(),
+	modeId: z.string().optional(),
+	modelId: z.string().optional(),
+});
+export type RewindSessionInput = z.infer<typeof rewindSessionInputSchema>;
+
+/**
  * Stops the session's harness process. The transcript stays readable; only the
  * live agent goes away, so a later `createSession` with `resume` picks it back
  * up. Closing an already-stopped session is not an error.
@@ -91,9 +129,51 @@ export const listSessionsInputSchema = z.object({
 });
 export type ListSessionsInput = z.infer<typeof listSessionsInputSchema>;
 
+/**
+ * Native harness history for the resume picker. Additive: this does not change
+ * `listSessions`, which stays the journal of sessions this app has opened.
+ */
+export const discoverSessionsInputSchema = z.object({
+	workspaceId: z.string().min(1),
+	harness: z.string().min(1),
+	/** Opaque page token from a previous `nextCursor`. Not a journal cursor. */
+	cursor: z.string().min(1).optional(),
+});
+export type DiscoverSessionsInput = z.infer<typeof discoverSessionsInputSchema>;
+
+export const discoveredSessionSchema = z.object({
+	sessionId: z.string().min(1),
+	cwd: z.string().min(1),
+	title: z.string().optional(),
+	/** RFC 3339 timestamp from the harness, when it sent one. */
+	updatedAt: z.string().optional(),
+});
+export type DiscoveredSession = z.infer<typeof discoveredSessionSchema>;
+
+export const discoverSessionsResultSchema = z.object({
+	/** False when this harness cannot list its own history. Not an error. */
+	supported: z.boolean(),
+	sessions: z.array(discoveredSessionSchema),
+	nextCursor: z.string().min(1).optional(),
+});
+export type DiscoverSessionsResult = z.infer<
+	typeof discoverSessionsResultSchema
+>;
+
 export const getItemsInputSchema = z.object({
 	sessionId: z.string().min(1),
 	before: cursorSchema.optional(),
 	limit: z.number().int().positive().max(500).default(200),
 });
 export type GetItemsInput = z.infer<typeof getItemsInputSchema>;
+
+export const getOutlineInputSchema = z.object({
+	sessionId: z.string().min(1),
+});
+export type GetOutlineInput = z.infer<typeof getOutlineInputSchema>;
+
+export const getItemBodiesInputSchema = z.object({
+	sessionId: z.string().min(1),
+	itemIds: z.array(z.string().min(1)).min(1).max(100),
+});
+export type GetItemBodiesInput = z.infer<typeof getItemBodiesInputSchema>;

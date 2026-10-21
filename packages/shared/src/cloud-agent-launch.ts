@@ -38,6 +38,12 @@ export const cloudAgentLaunchSchema = z.object({
 	 * itself once host-service is up.
 	 */
 	attachmentFileIds: z.array(z.string().uuid()).max(10).optional(),
+	surface: z.enum(["terminal", "chat"]).optional(),
+	/**
+	 * Set only by cloud automation dispatch. A manual create must not name a
+	 * run: the box reports this id, and the API trusts it as the correlation.
+	 */
+	automationRunId: z.string().uuid().optional(),
 });
 
 export type CloudAgentLaunch = z.infer<typeof cloudAgentLaunchSchema>;
@@ -49,6 +55,8 @@ const ENV = {
 	effort: "SUPERSET_SANDBOX_AGENT_EFFORT",
 	mode: "SUPERSET_SANDBOX_AGENT_MODE",
 	attachments: "SUPERSET_SANDBOX_AGENT_ATTACHMENTS",
+	surface: "SUPERSET_SANDBOX_AGENT_SURFACE",
+	automationRunId: "SUPERSET_SANDBOX_AGENT_AUTOMATION_RUN_ID",
 } as const;
 
 /** Every variable the launch travels in; stripped when a sandbox is promoted. */
@@ -68,6 +76,10 @@ export function cloudAgentLaunchToEnv(
 		...(launch.attachmentFileIds?.length
 			? { [ENV.attachments]: launch.attachmentFileIds.join(",") }
 			: {}),
+		...(launch.surface ? { [ENV.surface]: launch.surface } : {}),
+		...(launch.automationRunId
+			? { [ENV.automationRunId]: launch.automationRunId }
+			: {}),
 	};
 }
 
@@ -83,7 +95,15 @@ export function readCloudAgentLaunch(
 		effort: env[ENV.effort] || undefined,
 		mode: env[ENV.mode] || undefined,
 		attachmentFileIds: splitAttachmentIds(env[ENV.attachments]),
+		surface: env[ENV.surface] === "chat" ? "chat" : undefined,
+		automationRunId: readAutomationRunId(env[ENV.automationRunId]),
 	};
+}
+
+function readAutomationRunId(value: string | undefined): string | undefined {
+	return value && z.string().uuid().safeParse(value).success
+		? value
+		: undefined;
 }
 
 function splitAttachmentIds(value: string | undefined): string[] | undefined {

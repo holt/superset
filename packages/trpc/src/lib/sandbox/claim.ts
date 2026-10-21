@@ -7,6 +7,7 @@
 import { createHmac } from "node:crypto";
 import { db } from "@superset/db/client";
 import { type cloudWorkspaces, users } from "@superset/db/schema";
+import { GOLDEN_BOX_VCPUS } from "@superset/shared/billing";
 import {
 	type CloudAgentLaunch,
 	cloudAgentLaunchToEnv,
@@ -20,9 +21,11 @@ import { eq } from "drizzle-orm";
 import { env } from "../../env";
 import { resolveAgentCredentialEnv } from "../../router/agent-credential";
 import { resolveEnvironment } from "../../router/environment/resolve-environment";
+import { resolveMachineSize } from "../billing/plan";
 import { githubUserConnectionFor, githubUserTokenFor } from "../github-user";
 import { sandboxHostSecretFor } from "./access";
 import { deriveSandboxCredentials, gitAuthorFor } from "./credentials";
+import { creatorPlugins } from "./plugins";
 import { readRepoHooks } from "./repo-hooks";
 import {
 	installationTokenFor,
@@ -44,6 +47,16 @@ function agentCredentialDigest(userAgentEnv: Record<string, string>): string {
 
 /** Commits by a workspace nobody created, such as an automation's. */
 const SUPERSET_GIT_AUTHOR = { name: "Superset", email: "noreply@superset.sh" };
+
+/** A size the org no longer offers falls back to its default at the next start. */
+async function boxVcpus(row: CloudWorkspaceRow): Promise<number> {
+	const size =
+		(await resolveMachineSize(
+			row.organizationId,
+			row.machineSize ?? "large",
+		)) ?? (await resolveMachineSize(row.organizationId, null));
+	return size?.vcpus ?? GOLDEN_BOX_VCPUS;
+}
 
 export async function buildSandboxClaim(args: {
 	row: CloudWorkspaceRow;
@@ -83,6 +96,7 @@ export async function buildSandboxClaim(args: {
 				}),
 			])
 		: [null, null, undefined];
+	const plugins = await creatorPlugins(creator);
 	// The creator's own token when they have connected GitHub: pushes and pull
 	// requests are theirs. The App's installation token otherwise.
 	const token =
@@ -106,11 +120,10 @@ export async function buildSandboxClaim(args: {
 		SUPERSET_SANDBOX_ORGANIZATION_ID: args.row.organizationId,
 		...(creator ? { SUPERSET_SANDBOX_CREATOR_USER_ID: creator } : {}),
 		SUPERSET_SANDBOX_REPOSITORIES: JSON.stringify(repositories),
+		SUPERSET_SANDBOX_PLUGINS: JSON.stringify(plugins),
 		SUPERSET_SANDBOX_IMAGE_TAG: environment.sourceRef,
 		SUPERSET_SANDBOX_PROVIDER: args.row.provider,
-		...(environment.bundleSha
-			? { SUPERSET_BUNDLE_SHA: environment.bundleSha }
-			: {}),
+		SUPERSET_BUNDLE_SHA: environment.bundleSha,
 		...(env.SENTRY_DSN_SANDBOX
 			? {
 					HOST_SERVICE_SENTRY_DSN: env.SENTRY_DSN_SANDBOX,
@@ -143,6 +156,7 @@ export async function buildSandboxClaim(args: {
 			managedEnv,
 			networkPolicy,
 			ports: repoHooks?.ports,
+			vcpus: await boxVcpus(args.row),
 		},
 		environment: {
 			sourceKind: environment.sourceKind,

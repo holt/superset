@@ -6,6 +6,7 @@
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"dev": "wrangler dev",
+		"test": "bun test",
 		"test:integration": "bun scripts/storage-integration.ts",
 		"typecheck": "tsc --noEmit --emitDeclarationOnly false"
 	},
@@ -19,7 +20,7 @@
 		"@cloudflare/workers-types": "5.20260801.1",
 		"@superset/typescript": "workspace:*",
 		"jose": "6.2.2",
-		"typescript": "6.0.3",
+		"typescript": "7.0.2",
 		"wrangler": "4.118.0"
 	}
 }

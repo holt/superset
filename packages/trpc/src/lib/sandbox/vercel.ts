@@ -37,7 +37,7 @@ const SESSION_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const EXTEND_BELOW_MS = 60 * 60 * 1000;
 const WORKSPACE_SNAPSHOT_EXPIRATION_MS = 30 * 24 * 60 * 60 * 1000;
 /** 2 GB of memory per vCPU; disk is 64 GB regardless. */
-const IMAGE_SANDBOX_VCPUS = 8;
+export const MEMORY_MB_PER_VCPU = 2048;
 const GOLDEN_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const BOOT_COMMAND = "/usr/local/bin/superset-boot";
 const HOST_PROBE_TIMEOUT_MS = 1_500;
@@ -99,6 +99,23 @@ export interface SandboxClaim {
 	networkPolicy: NetworkPolicy;
 	/** Ports the workspace's repository asks to publish, beside the platform's. */
 	ports?: readonly number[];
+	vcpus: number;
+}
+
+/** Vercel allows 5 tags per sandbox. */
+function sandboxTags(
+	kind: "workspace" | "environment",
+	identity: SandboxIdentity,
+): Record<string, string> {
+	const tags = { kind, org: identity.SUPERSET_SANDBOX_ORGANIZATION_ID };
+	// A golden's identity is the workspace it was built from, not its own.
+	if (kind === "environment") return tags;
+	const user = identity.SUPERSET_SANDBOX_CREATOR_USER_ID;
+	return {
+		...tags,
+		workspace: identity.SUPERSET_SANDBOX_WORKSPACE_ID,
+		...(user ? { user } : {}),
+	};
 }
 
 function publishedPorts(extra: readonly number[] = []): number[] {
@@ -174,22 +191,23 @@ export async function provisionSandbox(args: {
 		snapshotExpiration:
 			kind === "environment" ? 0 : WORKSPACE_SNAPSHOT_EXPIRATION_MS,
 		keepLastSnapshots: { count: 1 },
-		tags: { kind },
+		tags: sandboxTags(kind, args.claim.identity),
 	};
 	const sandbox =
 		(await getSandbox(args.name)) ??
 		(args.environment.sourceKind === "fork"
-			? // A fork copies the golden's resources and its region; a snapshot
-				// only exists where it was taken.
+			? // A fork copies the golden's region; a snapshot only exists where
+				// it was taken.
 				await Sandbox.fork({
 					...config,
 					sourceSandbox: args.environment.sourceRef,
+					resources: { vcpus: args.claim.vcpus },
 				})
 			: await Sandbox.create({
 					...config,
 					image: args.environment.sourceRef,
 					region: args.environment.region as SandboxRegion,
-					resources: { vcpus: IMAGE_SANDBOX_VCPUS },
+					resources: { vcpus: args.claim.vcpus },
 				}));
 	await writeIdentity(sandbox, args.claim.identity);
 	await runBoot(sandbox, args.claim.hostSecret);
@@ -337,6 +355,8 @@ async function hostServiceAnswers(hostTarget: string): Promise<boolean> {
 export async function wakeSandbox(args: {
 	providerSandboxId: string;
 	claim: SandboxClaim;
+	/** Runs once the box is known to be stopped, before anything resumes it. */
+	beforeResume?: (box: { memoryMb: number; vcpus: number }) => Promise<void>;
 }): Promise<{
 	hostTarget: string;
 	/** The session was stopped, so every process on the box started from this claim. */
@@ -350,6 +370,23 @@ export async function wakeSandbox(args: {
 		});
 		const hostTarget = sandbox.domain(HOST_SERVICE_PORT);
 		const wasRunning = sandbox.status === "running";
+		let vcpus = sandbox.vcpus ?? args.claim.vcpus;
+		if (!wasRunning && vcpus !== args.claim.vcpus) {
+			await sandbox
+				.update({ resources: { vcpus: args.claim.vcpus } })
+				.then(() => {
+					vcpus = args.claim.vcpus;
+				})
+				.catch((error) =>
+					console.warn(
+						`[sandbox] resize to ${args.claim.vcpus} vCPUs failed for ${args.providerSandboxId}`,
+						error,
+					),
+				);
+		}
+		if (!wasRunning && args.beforeResume) {
+			await args.beforeResume({ memoryMb: vcpus * MEMORY_MB_PER_VCPU, vcpus });
+		}
 		if (wasRunning) {
 			const remaining = (sandbox.expiresAt?.getTime() ?? 0) - Date.now();
 			if (remaining < EXTEND_BELOW_MS) {
@@ -457,7 +494,7 @@ export async function promoteSandboxToEnvironment(args: {
 		persistent: true,
 		snapshotExpiration: 0,
 		keepLastSnapshots: { count: 1 },
-		tags: { kind: "environment" },
+		tags: sandboxTags("environment", args.claim.identity),
 	});
 	await stripWorkspaceIdentity(golden);
 	const created = golden.currentSnapshotId;
@@ -507,6 +544,109 @@ export async function stopSandbox(providerSandboxId: string): Promise<void> {
 	const sandbox = await getSandbox(providerSandboxId);
 	if (!sandbox || sandbox.status !== "running") return;
 	await sandbox.stop();
+}
+
+export interface BoxSession {
+	id: string;
+	memoryMb: number;
+	vcpus: number;
+	startedAt: number;
+	endedAt: number | null;
+	activeCpuMs: number | null;
+}
+
+const LIVE_STATUSES = new Set(["pending", "running"]);
+const SESSION_SEARCH_LIMIT = 20;
+
+export function sessionEndedAt(session: {
+	status: string;
+	stoppedAt?: number;
+	abortedAt?: number;
+	requestedStopAt?: number;
+	updatedAt: number;
+}): number | null {
+	if (LIVE_STATUSES.has(session.status)) return null;
+	return (
+		session.stoppedAt ??
+		session.abortedAt ??
+		session.requestedStopAt ??
+		session.updatedAt
+	);
+}
+
+interface RawSession {
+	id: string;
+	memory: number;
+	vcpus: number;
+	status: string;
+	startedAt?: number;
+	stoppedAt?: number;
+	abortedAt?: number;
+	requestedStopAt?: number;
+	updatedAt: number;
+	activeCpuDurationMs?: number;
+}
+
+function toBoxSession(session: RawSession): BoxSession | null {
+	if (session.startedAt === undefined) return null;
+	return {
+		id: session.id,
+		memoryMb: session.memory,
+		vcpus: session.vcpus,
+		startedAt: session.startedAt,
+		endedAt: sessionEndedAt(session),
+		activeCpuMs: session.activeCpuDurationMs ?? null,
+	};
+}
+
+/** Null when the sandbox no longer exists. */
+export async function findSandboxSession(
+	providerSandboxId: string,
+	sessionId: string | null,
+): Promise<{ session: BoxSession | null } | null> {
+	const sandbox = await getSandbox(providerSandboxId);
+	if (!sandbox) return null;
+	let seen = 0;
+	for await (const raw of await sandbox.listSessions({
+		sortOrder: "desc",
+		limit: SESSION_SEARCH_LIMIT,
+	})) {
+		const session = toBoxSession(raw);
+		if (session && (sessionId === null || session.id === sessionId)) {
+			return { session };
+		}
+		seen += 1;
+		if (seen >= SESSION_SEARCH_LIMIT) break;
+	}
+	return { session: null };
+}
+
+const SESSION_MAX_MS = 24 * 60 * 60 * 1000;
+const UNSETTLED_SANDBOX_STATUSES = new Set([
+	"pending",
+	"running",
+	"stopping",
+	"snapshotting",
+]);
+
+export async function listActiveWorkspaceSandboxes(
+	since: number,
+): Promise<string[]> {
+	const names: string[] = [];
+	const oldestRunning = Date.now() - SESSION_MAX_MS;
+	for await (const sandbox of await Sandbox.list({
+		...credentials(),
+		tags: { kind: "workspace" },
+		sortBy: "statusUpdatedAt",
+		sortOrder: "desc",
+	})) {
+		const updatedAt = sandbox.statusUpdatedAt ?? sandbox.updatedAt;
+		if (updatedAt < oldestRunning) break;
+		if (UNSETTLED_SANDBOX_STATUSES.has(sandbox.status) || updatedAt >= since) {
+			names.push(sandbox.name);
+		}
+	}
+	return names;
 }
 
 /** Best-effort: a sandbox already gone is the state we wanted. */

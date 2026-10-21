@@ -2,7 +2,9 @@ import { db } from "@superset/db/client";
 import { cloudWorkspaces, environments, tasks } from "@superset/db/schema";
 import type { CloudAgentLaunch } from "@superset/shared/cloud-agent-launch";
 import { and, eq, inArray, isNull } from "drizzle-orm";
+import { acpChatEnabled } from "../../lib/acp-chat";
 import { anchorAttachments } from "../../lib/attachments";
+import { resolveMachineSize } from "../../lib/billing/plan";
 import {
 	githubRepositoriesOutOfReach,
 	githubUserTokenFor,
@@ -14,9 +16,11 @@ import {
 	recordWorkspaceRepositories,
 	workspaceBranchName,
 } from "../../lib/sandbox";
+import { pushWorkspaceAccess } from "../../lib/workspace-access";
 import { userError } from "../../trpc";
 import { recordCloudWorkspaceActivity } from "./activity";
 import { publishCloudWorkspaceJob } from "./jobs";
+import { assertMayBoot } from "./meter";
 import {
 	FALLBACK_NAME,
 	type ProvisionCloudWorkspaceInput,
@@ -53,6 +57,24 @@ export async function loadUsableEnvironment(args: {
 	return environment;
 }
 
+export function machineSizeNotAvailable(name: string | undefined) {
+	return userError({
+		code: "BAD_REQUEST",
+		message: `Machine size "${name}" is not available for this organization`,
+		i18nKey: "serverError.cloudWorkspace.machineSizeNotAvailable",
+	});
+}
+
+export async function assertMachineSizeOffered(
+	organizationId: string,
+	name: string | null | undefined,
+): Promise<void> {
+	if (!name) return;
+	if (!(await resolveMachineSize(organizationId, name))) {
+		throw machineSizeNotAvailable(name);
+	}
+}
+
 /**
  * Records a cloud workspace and hands the sandbox off to a background job.
  *
@@ -79,8 +101,19 @@ export async function startCloudWorkspace(args: {
 	launch?: CloudAgentLaunch;
 	taskIds?: string[];
 	attachmentFileIds?: string[];
+	machineSize?: string;
+	beforeProvision?: (workspaceId: string) => Promise<void>;
 }) {
+	// The sandbox's Codex is older than the codex-acp floor, so only Claude chats.
+	const openAsChat =
+		args.launch?.agent === "claude"
+			? acpChatEnabled(args.userId)
+			: Promise.resolve(false);
 	const environment = await loadUsableEnvironment(args);
+	const size = await resolveMachineSize(args.organizationId, args.machineSize);
+	if (!size) throw machineSizeNotAvailable(args.machineSize);
+	const machineSize = size.name;
+	await assertMayBoot(args.organizationId, size.vcpus);
 
 	// A workspace is started from an environment, and the environment's
 	// repositories are its checkouts.
@@ -128,6 +161,7 @@ export async function startCloudWorkspace(args: {
 			id,
 			organizationId: args.organizationId,
 			name,
+			machineSize,
 			branch: workspaceBranchName({ id, name }),
 			baseBranch: branch,
 			provider: "vercel",
@@ -182,9 +216,27 @@ export async function startCloudWorkspace(args: {
 	const job = {
 		cloudWorkspaceId: row.id,
 		...(args.name ? {} : { namingPrompt: args.prompt ?? "" }),
-		...(args.launch ? { launch: args.launch } : {}),
+		...(args.launch
+			? {
+					launch: {
+						...args.launch,
+						surface: (await openAsChat) ? ("chat" as const) : undefined,
+					},
+				}
+			: {}),
 	};
 
+	pushWorkspaceAccess(row.organizationId, row.id);
+	try {
+		await args.beforeProvision?.(row.id);
+	} catch (error) {
+		await transitionCloudWorkspace({
+			id: row.id,
+			from: ["provisioning"],
+			to: "deleted",
+		});
+		throw error;
+	}
 	nudge(row.organizationId, "cloud_workspaces");
 	await queueProvision(job);
 	return row;

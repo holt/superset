@@ -22,19 +22,27 @@ import {
 	slugifyForBranch,
 } from "@superset/shared/workspace-launch";
 import { and, eq, sql } from "drizzle-orm";
+import { acpChatEnabled } from "../../lib/acp-chat";
 import { nudge } from "../../lib/realtime";
 import { fetchRelayPresence } from "../../lib/relay-presence";
 import { runInCloud } from "./cloudDispatch";
-import { RelayDispatchError, relayMutation } from "./relay-client";
+import { type HostCaller, launchAgentSession } from "./hostSession";
+import {
+	type RelayClientOptions,
+	RelayDispatchError,
+	relayMutation,
+	relayQuery,
+} from "./relay-client";
 import {
 	type AgentRunResult,
 	classifyDispatchError,
 	describeError,
 	nonForkPullRequest,
-	previousRunTerminal,
+	previousRunSession,
 	type RunWorkspace,
 	replacePin,
 } from "./run";
+import { recordDispatchedRun } from "./sessionRecord";
 import { promptWithTriggerContext } from "./triggerContext";
 
 export type DispatchOutcome =
@@ -72,6 +80,7 @@ export type DispatchableAutomation = Pick<
 	| "environmentId"
 	| "tags"
 	| "continueAgentSession"
+	| "machineSize"
 >;
 
 /**
@@ -153,10 +162,11 @@ export async function dispatchAutomation(
 			automation,
 			cause,
 			CLOUD_HOST_ID,
-			async (_run, placed) => {
+			async (run, placed) => {
 				const event = await causeEvent(cause);
 				return runInCloud({
 					automation,
+					runId: run.id,
 					prompt: runPrompt(
 						automation,
 						cause,
@@ -245,25 +255,26 @@ export async function dispatchAutomation(
 
 		// Opt-in, and only for a pinned workspace: that is where a session from
 		// a previous run can still be alive.
-		const continueTerminalId =
+		const previous =
 			automation.continueAgentSession && automation.v2WorkspaceId
-				? await previousRunTerminal(automation.id, {
+				? await previousRunSession(automation.id, {
 						v2WorkspaceId: automation.v2WorkspaceId,
 					})
 				: undefined;
 
+		const chat = await acpChatEnabled(automation.ownerUserId);
+		const hostCaller = relayHostCaller({ relayUrl, hostId: routingKey, jwt });
+
 		const runAgent = (targetWorkspaceId: string) =>
-			runAgentOnHost({
-				relayUrl,
-				hostId: routingKey,
-				jwt,
+			launchAgentSession(hostCaller, {
 				workspaceId: targetWorkspaceId,
 				agent: automation.agent,
 				prompt,
+				chat,
 				// Only the pinned workspace holds that session; the stale-pin
 				// recovery below branches a fresh one, which has none.
-				...(continueTerminalId && targetWorkspaceId === automation.v2WorkspaceId
-					? { continueTerminalId }
+				...(previous && targetWorkspaceId === automation.v2WorkspaceId
+					? { previous }
 					: {}),
 			});
 
@@ -322,17 +333,13 @@ async function dispatchRun(
 		const session = await start(run, (placed) => {
 			workspace = placed;
 		});
-		await db
-			.update(automationRuns)
-			.set({
-				status: "dispatched",
-				sessionKind: session?.kind ?? null,
-				chatSessionId: null,
-				terminalSessionId: session?.sessionId ?? null,
-				...workspace,
-				dispatchedAt: new Date(),
-			})
-			.where(eq(automationRuns.id, run.id));
+		await recordDispatchedRun({
+			runId: run.id,
+			organizationId: automation.organizationId,
+			ownerUserId: automation.ownerUserId,
+			workspace,
+			session,
+		});
 	} catch (err) {
 		const error = describeError(err, "dispatch");
 		const errorCode = classifyDispatchError(err);
@@ -687,36 +694,11 @@ async function createWorkspaceOnHost(args: {
 	return { workspaceId: result.workspace.id };
 }
 
-async function runAgentOnHost(args: {
-	relayUrl: string;
-	hostId: string;
-	jwt: string;
-	workspaceId: string;
-	agent: string;
-	prompt: string;
-	/** See {@link previousRunTerminal}. */
-	continueTerminalId?: string;
-}): Promise<AgentRunResult> {
-	return relayMutation<
-		{
-			workspaceId: string;
-			agent: string;
-			prompt: string;
-			continueTerminalId?: string;
-		},
-		AgentRunResult
-	>(
-		{ relayUrl: args.relayUrl, hostId: args.hostId, jwt: args.jwt },
-		"agents.run",
-		{
-			workspaceId: args.workspaceId,
-			agent: args.agent,
-			prompt: args.prompt,
-			// A host that predates this strips the unknown key and launches,
-			// which is exactly what every host did before it existed.
-			...(args.continueTerminalId
-				? { continueTerminalId: args.continueTerminalId }
-				: {}),
-		},
-	);
+function relayHostCaller(options: RelayClientOptions): HostCaller {
+	return {
+		mutation: <TOutput>(procedure: string, input: object) =>
+			relayMutation<object, TOutput>(options, procedure, input),
+		query: <TOutput>(procedure: string, input: object) =>
+			relayQuery<object, TOutput>(options, procedure, input),
+	};
 }

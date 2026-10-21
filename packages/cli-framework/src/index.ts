@@ -28,7 +28,7 @@ export { createCommandsPlugin } from "./plugin";
 export type { CliCommand, CliGroup } from "./router";
 export { buildTree, filterByAudience, routeCommand } from "./router";
 export type { CommandTree, RunOptions } from "./runner";
-export { introspectCli, run } from "./runner";
+export { formatError, introspectCli, run } from "./runner";
 export type {
 	CliSchema,
 	SchemaArg,
@@ -36,3 +36,4 @@ export type {
 	SchemaOption,
 } from "./schema";
 export { generateSchema } from "./schema";
+export { wrapText } from "./wrap-text";

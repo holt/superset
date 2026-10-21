@@ -1,39 +1,75 @@
 import { randomUUID } from "node:crypto";
+import {
+	deriveTimeline,
+	emptySnapshot,
+	outlineSnapshot,
+	reduceMany,
+	type SessionOutline,
+	type SessionSnapshot,
+	type StoredItem,
+} from "@superset/chat/core";
 import type {
+	AgentMessage,
+	ApprovalRequest,
 	CancelTurnInput,
 	CloseSessionInput,
 	Cursor,
+	DiscoverSessionsResult,
+	DurableEvent,
 	GetItemsInput,
 	GetSessionInput,
 	PromptInput,
+	QueuedPromptInput,
 	RespondToApprovalInput,
+	ResumeQueueInput,
 	SetConfigOptionInput,
 	SetModeInput,
+	StopBackgroundTaskInput,
 } from "@superset/chat/protocol";
 import {
 	cancelTurnInputSchema,
 	closeSessionInputSchema,
 	createSessionInputSchema,
+	discoverSessionsInputSchema,
 	forkSessionInputSchema,
+	getItemBodiesInputSchema,
 	getItemsInputSchema,
+	getOutlineInputSchema,
 	getSessionInputSchema,
 	listSessionsInputSchema,
 	promptInputSchema,
+	queuedPromptInputSchema,
 	respondToApprovalInputSchema,
+	resumeQueueInputSchema,
+	rewindSessionInputSchema,
 	setConfigOptionInputSchema,
 	setModeInputSchema,
+	stopBackgroundTaskInputSchema,
 } from "@superset/chat/protocol";
 import { z } from "zod";
 import type { ChatDb, ChatSessionRow } from "../../db";
 import type { ChatJournal } from "../../journal";
 import type { ChatSessionStore } from "../../projection";
-import type { PageResult } from "../../replay";
-import { readPage } from "../../replay";
-import type { LiveSessionRegistry, PromptResult } from "../../sessions";
+import type { ChatResetReason, PageResult } from "../../replay";
+import { latestSeq, readPage, readSince } from "../../replay";
+import type {
+	LiveSessionRegistry,
+	PromptResult,
+	QueueState,
+} from "../../sessions";
 
 export const createSessionCommandSchema = createSessionInputSchema
 	.omit({ workspaceId: true })
-	.extend({ scopeId: z.string().min(1), cwd: z.string().min(1) });
+	.extend({
+		scopeId: z.string().min(1),
+		cwd: z.string().min(1),
+		resume: z
+			.object({
+				harnessSessionId: z.string().min(1),
+				quiet: z.boolean().optional(),
+			})
+			.optional(),
+	});
 export type CreateSessionCommandInput = z.input<
 	typeof createSessionCommandSchema
 >;
@@ -43,11 +79,68 @@ export const forkSessionCommandSchema = forkSessionInputSchema.extend({
 });
 export type ForkSessionCommandInput = z.input<typeof forkSessionCommandSchema>;
 
+export const rewindSessionCommandSchema = rewindSessionInputSchema.extend({
+	cwd: z.string().min(1),
+});
+export type RewindSessionCommandInput = z.input<
+	typeof rewindSessionCommandSchema
+>;
+
+function lastAgentMessageId(events: DurableEvent[]): string | null {
+	for (let i = events.length - 1; i >= 0; i--) {
+		const event = events[i];
+		if (event?.type !== "item" || event.item.kind !== "agent_message") continue;
+		const id = (event.item as AgentMessage).agentMessageId;
+		if (id) return id;
+	}
+	return null;
+}
+
+/**
+ * The finished turns and items shown before `itemId`, or null when it is not
+ * there. `midTurn` is set when `itemId` was sent into a turn already running.
+ */
+function transcriptBefore(
+	snapshot: SessionSnapshot,
+	itemId: string,
+): { events: DurableEvent[]; midTurn: boolean } | null {
+	const events: DurableEvent[] = [];
+	for (const group of deriveTimeline(snapshot)) {
+		const items = group.entries.flatMap((entry) =>
+			entry.kind === "item" ? [entry.item] : entry.items,
+		);
+		const index = items.findIndex((item) => item.id === itemId);
+		const kept = (index === -1 ? items : items.slice(0, index)).filter(
+			(item) =>
+				item.kind !== "approval_request" ||
+				(item as ApprovalRequest).status !== "pending",
+		);
+		if (kept.length > 0) {
+			if (group.turn) events.push({ type: "turn", turn: group.turn });
+			for (const item of kept) {
+				events.push({ type: "item", item, turnId: group.turnId });
+			}
+		}
+		if (index !== -1) return { events, midTurn: index > 0 };
+	}
+	return null;
+}
+
 export const listSessionsCommandSchema = listSessionsInputSchema
 	.omit({ workspaceId: true })
 	.extend({ scopeId: z.string().min(1).optional() });
 export type ListSessionsCommandInput = z.input<
 	typeof listSessionsCommandSchema
+>;
+
+export const discoverSessionsCommandSchema = discoverSessionsInputSchema
+	.omit({ workspaceId: true })
+	.extend({
+		scopeId: z.string().min(1),
+		cwd: z.string().min(1),
+	});
+export type DiscoverSessionsCommandInput = z.input<
+	typeof discoverSessionsCommandSchema
 >;
 
 export type CreateSessionResult = {
@@ -64,23 +157,54 @@ export type GetSessionResult = {
 	 * caller that wants to prompt has to ask this, not the status.
 	 */
 	live: boolean;
+	/** For a dead session, why it died, when the journal says. */
+	lastError?: string;
+};
+
+export type GetQueueResult = QueueState & { live: boolean };
+
+export type ChatSessionListEntry = ChatSessionRow & {
+	live: boolean;
+	terminalId: string | null;
 };
 
 export type ChatCommands = {
 	createSession(input: CreateSessionCommandInput): CreateSessionResult;
 	prompt(input: PromptInput): PromptResult;
+	removeQueuedPrompt(input: QueuedPromptInput): void;
+	steerQueuedPrompt(input: QueuedPromptInput): void;
+	resumeQueue(input: ResumeQueueInput): void;
 	cancelTurn(input: CancelTurnInput): void;
+	stopBackgroundTask(input: StopBackgroundTaskInput): Promise<boolean>;
 	respondToApproval(input: RespondToApprovalInput): void;
 	setMode(input: SetModeInput): void;
 	setConfigOption(input: SetConfigOptionInput): void;
 	closeSession(input: CloseSessionInput): Promise<void>;
+	closeScope(scopeId: string): Promise<void>;
 	forkSession(
 		input: ForkSessionCommandInput,
 	): Promise<CreateSessionResult | null>;
+	rewindSession(input: RewindSessionCommandInput): Promise<CreateSessionResult>;
 	getSession(input: GetSessionInput): GetSessionResult;
-	listSessions(input: ListSessionsCommandInput): ChatSessionRow[];
+	getQueue(input: GetSessionInput): GetQueueResult;
+	listSessions(input: ListSessionsCommandInput): ChatSessionListEntry[];
+	discoverSessions(
+		input: DiscoverSessionsCommandInput,
+	): Promise<DiscoverSessionsResult>;
 	getItems(input: z.input<typeof getItemsInputSchema>): PageResult;
+	getOutline(input: z.input<typeof getOutlineInputSchema>): OutlineResult;
+	getItemBodies(
+		input: z.input<typeof getItemBodiesInputSchema>,
+	): ItemBodiesResult;
 };
+
+export type OutlineResult =
+	| { ok: true; outline: SessionOutline }
+	| { ok: false; reset: ChatResetReason };
+
+export type ItemBodiesResult =
+	| { ok: true; items: StoredItem[] }
+	| { ok: false; reset: ChatResetReason };
 
 export type CommandsOptions = {
 	journal: ChatJournal;
@@ -91,15 +215,87 @@ export type CommandsOptions = {
 	mintSessionId?: () => string;
 };
 
+const MAX_CACHED_REPLAY_EVENTS = 20_000;
+
 export function createCommands(options: CommandsOptions): ChatCommands {
 	const mintSessionId = options.mintSessionId ?? randomUUID;
 
-	const listSessions = (input: ListSessionsCommandInput): ChatSessionRow[] => {
+	const replays = new Map<
+		string,
+		{ epoch: string; seq: number; snapshot: SessionSnapshot }
+	>();
+	const replaySession = (
+		sessionId: string,
+	):
+		| { ok: true; snapshot: SessionSnapshot }
+		| { ok: false; reset: ChatResetReason } => {
+		const session = options.sessions.get(sessionId);
+		if (!session) return { ok: false, reset: "session_not_found" };
+		const seq = latestSeq(options.db, sessionId, session.epoch);
+		const cached = replays.get(sessionId);
+		const base =
+			cached && cached.epoch === session.epoch && cached.seq <= seq
+				? cached
+				: null;
+		if (base && base.seq === seq) {
+			return { ok: true, snapshot: base.snapshot };
+		}
+		const replay = readSince(options.db, sessionId, {
+			epoch: session.epoch,
+			seq: base?.seq ?? 0,
+		});
+		if (!replay.ok) return replay;
+		const snapshot = reduceMany(
+			base?.snapshot ?? emptySnapshot(),
+			replay.envelopes,
+		);
+		replays.delete(sessionId);
+		replays.set(sessionId, {
+			epoch: session.epoch,
+			seq: replay.envelopes.at(-1)?.cursor.seq ?? base?.seq ?? 0,
+			snapshot,
+		});
+		let cachedEvents = 0;
+		for (const entry of replays.values()) cachedEvents += entry.seq;
+		for (const [key, entry] of replays) {
+			if (cachedEvents <= MAX_CACHED_REPLAY_EVENTS || key === sessionId) break;
+			replays.delete(key);
+			cachedEvents -= entry.seq;
+		}
+		if (cachedEvents > MAX_CACHED_REPLAY_EVENTS) replays.delete(sessionId);
+		return { ok: true, snapshot };
+	};
+
+	const lastErrorNotice = (sessionId: string): string | null => {
+		const replay = replaySession(sessionId);
+		if (!replay.ok) return null;
+		let latest: { at: number; text: string } | null = null;
+		for (const { item } of replay.snapshot.items.values()) {
+			if (item.kind !== "notice") continue;
+			const notice = item as { noticeKind?: string; text?: string };
+			if (notice.noticeKind !== "error" || !notice.text) continue;
+			if (!latest || item.startedAtMs >= latest.at) {
+				latest = { at: item.startedAtMs, text: notice.text };
+			}
+		}
+		return latest?.text ?? null;
+	};
+
+	const listSessions = (
+		input: ListSessionsCommandInput,
+	): ChatSessionListEntry[] => {
 		const parsed = listSessionsCommandSchema.parse(input);
 		const rows = parsed.scopeId
 			? options.sessions.listByScope(parsed.scopeId)
 			: options.sessions.list();
-		return rows.slice(0, parsed.limit);
+		return rows.slice(0, parsed.limit).map((row) => {
+			const live = options.live.get(row.sessionId);
+			return {
+				...row,
+				live: live !== null,
+				terminalId: live?.terminalId ?? null,
+			};
+		});
 	};
 
 	return {
@@ -124,6 +320,7 @@ export function createCommands(options: CommandsOptions): ChatCommands {
 						modeId: parsed.modeId,
 						modelId: parsed.modelId,
 						resume: parsed.resume,
+						terminalId: parsed.terminalId,
 					});
 				} catch (error) {
 					options.journal.discard(sessionId);
@@ -138,14 +335,51 @@ export function createCommands(options: CommandsOptions): ChatCommands {
 			return options.dedupe.run(`prompt:${parsed.commandId}`, () =>
 				options.live
 					.require(parsed.sessionId)
-					.prompt(parsed.content, parsed.clientId),
+					.prompt(
+						parsed.content,
+						parsed.clientId,
+						parsed.steer?.expectedTurnId,
+					),
+			);
+		},
+
+		removeQueuedPrompt(input) {
+			const parsed: QueuedPromptInput = queuedPromptInputSchema.parse(input);
+			options.dedupe.run(`removeQueuedPrompt:${parsed.commandId}`, () => {
+				options.live.require(parsed.sessionId).removeQueued(parsed.itemId);
+			});
+		},
+
+		steerQueuedPrompt(input) {
+			const parsed: QueuedPromptInput = queuedPromptInputSchema.parse(input);
+			options.dedupe.run(`steerQueuedPrompt:${parsed.commandId}`, () => {
+				options.live.require(parsed.sessionId).steerQueued(parsed.itemId);
+			});
+		},
+
+		resumeQueue(input) {
+			const parsed: ResumeQueueInput = resumeQueueInputSchema.parse(input);
+			options.dedupe.run(`resumeQueue:${parsed.commandId}`, () => {
+				options.live.require(parsed.sessionId).resumeQueue();
+			});
+		},
+
+		stopBackgroundTask(input) {
+			const parsed: StopBackgroundTaskInput =
+				stopBackgroundTaskInputSchema.parse(input);
+			return options.dedupe.run(`stopBackgroundTask:${parsed.commandId}`, () =>
+				options.live
+					.require(parsed.sessionId)
+					.stopBackgroundTask(parsed.taskId),
 			);
 		},
 
 		cancelTurn(input) {
 			const parsed: CancelTurnInput = cancelTurnInputSchema.parse(input);
 			options.dedupe.run(`cancelTurn:${parsed.commandId}`, () => {
-				options.live.require(parsed.sessionId).cancelTurn(parsed.turnId);
+				options.live
+					.require(parsed.sessionId)
+					.cancelTurn(parsed.turnId, parsed.pauseQueue);
 			});
 		},
 
@@ -183,7 +417,8 @@ export function createCommands(options: CommandsOptions): ChatCommands {
 		 */
 		async forkSession(input) {
 			const parsed = forkSessionCommandSchema.parse(input);
-			const forked = await options.live.require(parsed.sessionId).fork();
+			const live = options.live.require(parsed.sessionId);
+			const forked = await live.fork();
 			if (!forked) return null;
 			const source = options.sessions.get(parsed.sessionId);
 			if (!source) return null;
@@ -193,30 +428,144 @@ export function createCommands(options: CommandsOptions): ChatCommands {
 				cwd: parsed.cwd,
 				harness: parsed.harness ?? source.harness,
 				resume: { harnessSessionId: forked },
+				terminalId: live.terminalId,
 			});
 		},
 
-		closeSession(input) {
+		/**
+		 * A rewind continues in a new session with the transcript before the
+		 * chosen message copied in, so the chat reads the same. An agent that can
+		 * fork at a message resumes its own history cut there; any other is told
+		 * that conversation in a hidden part of the edited prompt.
+		 */
+		async rewindSession(input) {
+			const parsed = rewindSessionCommandSchema.parse(input);
+			return options.dedupe.run(
+				`rewindSession:${parsed.commandId}`,
+				async () => {
+					const source = options.sessions.get(parsed.sessionId);
+					const replay = replaySession(parsed.sessionId);
+					if (!source || !replay.ok) {
+						throw new Error(`chat session ${parsed.sessionId} is not running`);
+					}
+					const before = transcriptBefore(replay.snapshot, parsed.itemId);
+					if (!before) {
+						throw new Error(
+							`message ${parsed.itemId} is not in chat session ${parsed.sessionId}`,
+						);
+					}
+					const sourceLive = options.live.get(parsed.sessionId);
+					// Some agents fork a whole turn, so a cut inside one would keep what came after it.
+					const cutAt = before.midTurn
+						? null
+						: lastAgentMessageId(before.events);
+					const forked =
+						cutAt && sourceLive
+							? await sourceLive
+									.fork({ upToMessageId: cutAt })
+									.catch((error: unknown) => {
+										console.warn(
+											"[chat-runtime] could not fork the agent at the rewind point",
+											error,
+										);
+										return null;
+									})
+							: null;
+					const created = this.createSession({
+						commandId: parsed.commandId,
+						scopeId: source.scopeId,
+						cwd: parsed.cwd,
+						harness: source.harness,
+						modeId: sourceLive?.state.modeId ?? parsed.modeId,
+						modelId: parsed.modelId,
+						terminalId: sourceLive?.terminalId,
+						...(forked
+							? { resume: { harnessSessionId: forked, quiet: true } }
+							: {}),
+					});
+					try {
+						const live = options.live.require(created.sessionId);
+						live.seed(before.events);
+						live.prompt(
+							[
+								...(parsed.handoffPrompt && !forked
+									? [
+											{
+												type: "text" as const,
+												text: parsed.handoffPrompt,
+												hidden: true,
+											},
+										]
+									: []),
+								{ type: "text", text: parsed.prompt },
+							],
+							`rewind-${parsed.commandId}`,
+						);
+					} catch (error) {
+						await this.closeSession({ sessionId: created.sessionId }).catch(
+							() => undefined,
+						);
+						throw error;
+					}
+					return created;
+				},
+			);
+		},
+
+		async closeSession(input) {
 			const parsed: CloseSessionInput = closeSessionInputSchema.parse(input);
-			return options.live.dispose(parsed.sessionId);
+			const wasLive = options.live.get(parsed.sessionId) !== null;
+			replays.delete(parsed.sessionId);
+			try {
+				await options.live.dispose(parsed.sessionId);
+			} finally {
+				if (wasLive) options.journal.announce(parsed.sessionId);
+			}
+		},
+
+		async closeScope(scopeId) {
+			const closed = await options.live.disposeScope(scopeId);
+			for (const sessionId of closed) {
+				replays.delete(sessionId);
+				options.journal.announce(sessionId);
+			}
 		},
 
 		getSession(input) {
 			const parsed: GetSessionInput = getSessionInputSchema.parse(input);
+			const seq = options.sessions.get(parsed.sessionId)
+				? options.journal.cursor(parsed.sessionId).seq
+				: null;
+			// Reading the cursor can backfill the row, so read the row after it.
 			const session = options.sessions.get(parsed.sessionId);
+			const lastError =
+				session?.status === "dead" ? lastErrorNotice(parsed.sessionId) : null;
 			return {
 				live: options.live.get(parsed.sessionId) !== null,
 				session,
-				cursor: session
-					? {
-							epoch: session.epoch,
-							seq: options.journal.cursor(parsed.sessionId).seq,
-						}
-					: null,
+				cursor: session && seq !== null ? { epoch: session.epoch, seq } : null,
+				...(lastError ? { lastError } : {}),
 			};
 		},
 
+		getQueue(input) {
+			const parsed: GetSessionInput = getSessionInputSchema.parse(input);
+			const session = options.live.get(parsed.sessionId);
+			if (!session) return { live: false, paused: false, prompts: [] };
+			return { live: true, ...session.queueState };
+		},
+
 		listSessions,
+
+		discoverSessions(input) {
+			const parsed = discoverSessionsCommandSchema.parse(input);
+			return options.live.discoverSessions({
+				harness: parsed.harness,
+				scopeId: parsed.scopeId,
+				cwd: parsed.cwd,
+				...(parsed.cursor ? { cursor: parsed.cursor } : {}),
+			});
+		},
 
 		getItems(input) {
 			const parsed: GetItemsInput = getItemsInputSchema.parse(input);
@@ -224,6 +573,26 @@ export function createCommands(options: CommandsOptions): ChatCommands {
 				before: parsed.before,
 				limit: parsed.limit,
 			});
+		},
+
+		getOutline(input) {
+			const { sessionId } = getOutlineInputSchema.parse(input);
+			const replayed = replaySession(sessionId);
+			if (!replayed.ok) return replayed;
+			return { ok: true, outline: outlineSnapshot(replayed.snapshot) };
+		},
+
+		getItemBodies(input) {
+			const { sessionId, itemIds } = getItemBodiesInputSchema.parse(input);
+			const replayed = replaySession(sessionId);
+			if (!replayed.ok) return replayed;
+			return {
+				ok: true,
+				items: itemIds.flatMap((id) => {
+					const stored = replayed.snapshot.items.get(id);
+					return stored ? [stored] : [];
+				}),
+			};
 		},
 	};
 }

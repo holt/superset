@@ -4,6 +4,7 @@ import { COMPANY } from "@superset/shared/constants";
 import { app, BrowserWindow, Menu, shell } from "electron";
 import { env } from "main/env.main";
 import { resetTerminalStateDev } from "main/lib/terminal/dev-reset";
+import { getAppDisplayName } from "./app-display-name";
 import {
 	checkForUpdatesInteractive,
 	simulateDownloading,
@@ -14,9 +15,9 @@ import { menuEmitter } from "./menu-events";
 import { confirmAndQuitCompletely } from "./quit-completely";
 
 export function createApplicationMenu() {
+	const displayName = getAppDisplayName();
 	const reloadAccelerator = "CmdOrCtrl+R";
 	const closeAccelerator = "CmdOrCtrl+Shift+Q";
-	const showHotkeysAccelerator = "CmdOrCtrl+/";
 	const openSettingsAccelerator = "CmdOrCtrl+,";
 	// macOS/VS Code convention for New Window. On Windows/Linux Ctrl+Shift+N is
 	// already New Workspace, so use Ctrl+Alt+N there.
@@ -39,13 +40,14 @@ export function createApplicationMenu() {
 					},
 				},
 				{ type: "separator" },
+				// No accelerator: on macOS it is always live and would bypass the
+				// user's OPEN_PROJECT / OPEN_IN_APP bindings (Settings > Keyboard).
 				{
 					label: i18n._(
 						msg({
-							message: "Open Repo...",
+							message: "Add Project from Folder...",
 						}),
 					),
-					accelerator: "CmdOrCtrl+O",
 					click: () => {
 						menuEmitter.emit("open-project");
 					},
@@ -86,7 +88,9 @@ export function createApplicationMenu() {
 							{ type: "separator" },
 							{ role: "quit" },
 							{
-								label: i18n._(msg({ message: "Quit Superset Completely" })),
+								label: i18n._(
+									msg({ message: `Quit ${displayName} Completely` }),
+								),
 								click: () => {
 									void confirmAndQuitCompletely();
 								},
@@ -237,7 +241,6 @@ export function createApplicationMenu() {
 							message: "Keyboard Shortcuts",
 						}),
 					),
-					accelerator: showHotkeysAccelerator,
 					click: () => {
 						menuEmitter.emit("open-settings", "keyboard");
 					},
@@ -283,10 +286,17 @@ export function createApplicationMenu() {
 	}
 
 	if (process.platform === "darwin") {
+		// Electron's built-in role labels are English and use app.name.
+		const renamed = displayName !== app.name;
 		template.unshift({
-			label: app.name,
+			label: displayName,
 			submenu: [
-				{ role: "about" },
+				{
+					role: "about",
+					...(renamed && {
+						label: i18n._(msg({ message: `About ${displayName}` })),
+					}),
+				},
 				{ type: "separator" },
 				{
 					label: i18n._(
@@ -312,15 +322,25 @@ export function createApplicationMenu() {
 				{ type: "separator" },
 				{ role: "services" },
 				{ type: "separator" },
-				{ role: "hide" },
+				{
+					role: "hide",
+					...(renamed && {
+						label: i18n._(msg({ message: `Hide ${displayName}` })),
+					}),
+				},
 				{ role: "hideOthers" },
 				{ role: "unhide" },
 				{ type: "separator" },
-				{ role: "quit" },
+				{
+					role: "quit",
+					...(renamed && {
+						label: i18n._(msg({ message: `Quit ${displayName}` })),
+					}),
+				},
 				{
 					label: i18n._(
 						msg({
-							message: "Quit Superset Completely",
+							message: `Quit ${displayName} Completely`,
 						}),
 					),
 					click: () => {

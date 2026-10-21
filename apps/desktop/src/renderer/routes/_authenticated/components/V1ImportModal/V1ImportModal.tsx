@@ -40,6 +40,7 @@ export function V1ImportModal() {
 
 	return (
 		<Dialog
+			modal
 			open={isOpen}
 			onOpenChange={(open) => {
 				if (!open) close();
@@ -61,7 +62,7 @@ export function V1ImportModal() {
 				</DialogTitle>
 				<DialogDescription className="sr-only">
 					Let's get your workspaces and projects ported over. Terminal sessions
-					won't be carried over, but you can still access v1 at any time.
+					won't be carried over.
 				</DialogDescription>
 
 				<div

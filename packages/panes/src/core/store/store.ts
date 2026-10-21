@@ -109,9 +109,20 @@ export type CreateTabInput<TData> = {
 	activePaneId?: string;
 };
 
+export type OpenPaneArgs<TData> = {
+	pane: CreatePaneInput<TData>;
+	beside?: string;
+};
+
+export type PlacePane<TData> = (
+	store: WorkspaceStore<TData>,
+	args: OpenPaneArgs<TData>,
+) => void;
+
 export interface WorkspaceStore<TData> extends WorkspaceState<TData> {
 	addTab: (args: CreateTabInput<TData>) => void;
-	removeTab: (tabId: string) => void;
+	removeTab: (tabId: string, options?: { intent?: "close" | "remove" }) => void;
+	insertTab: (args: { tab: Tab<TData>; index?: number }) => void;
 	setActiveTab: (tabId: string) => void;
 	setTabTitleOverride: (args: {
 		tabId: string;
@@ -146,7 +157,7 @@ export interface WorkspaceStore<TData> extends WorkspaceState<TData> {
 		newPane: CreatePaneInput<TData>;
 	}) => void;
 
-	openPane: (args: { pane: CreatePaneInput<TData> }) => void;
+	openPane: (args: OpenPaneArgs<TData>) => void;
 
 	splitPane: (args: {
 		tabId: string;
@@ -194,6 +205,7 @@ export interface WorkspaceStore<TData> extends WorkspaceState<TData> {
 
 export interface CreateWorkspaceStoreOptions<TData> {
 	initialState?: WorkspaceState<TData>;
+	placePane?: PlacePane<TData>;
 }
 
 export function createWorkspaceStore<TData>(
@@ -210,6 +222,7 @@ export function createWorkspaceStore<TData>(
 			}
 		}
 	};
+	const placePane = options?.placePane;
 	return createStore<WorkspaceStore<TData>>((set, get) => ({
 		version: 1,
 		tabs: options?.initialState?.tabs ?? [],
@@ -234,7 +247,7 @@ export function createWorkspaceStore<TData>(
 			}));
 		},
 
-		removeTab: (tabId) => {
+		removeTab: (tabId, options) => {
 			const tab = get().getTab(tabId);
 			if (!tab) return;
 			set((s) => {
@@ -248,7 +261,20 @@ export function createWorkspaceStore<TData>(
 					),
 				};
 			});
-			notifyClosed(Object.values(tab.panes));
+			if (options?.intent !== "remove") notifyClosed(Object.values(tab.panes));
+		},
+
+		insertTab: (args) => {
+			set((s) => {
+				if (s.tabs.some((t) => t.id === args.tab.id)) return s;
+				const nextTabs = [...s.tabs];
+				const index = Math.max(
+					0,
+					Math.min(args.index ?? nextTabs.length, nextTabs.length),
+				);
+				nextTabs.splice(index, 0, args.tab);
+				return { tabs: nextTabs, activeTabId: args.tab.id };
+			});
 		},
 
 		setActiveTab: (tabId) => {
@@ -458,6 +484,30 @@ export function createWorkspaceStore<TData>(
 
 		openPane: (args) => {
 			const s = get();
+			if (placePane) {
+				placePane(s, args);
+				return;
+			}
+			const anchor = args.beside ? s.getPane(args.beside) : null;
+			const besideTab = anchor ? s.getTab(anchor.tabId) : null;
+			if (anchor && besideTab) {
+				const reusable = Object.values(besideTab.panes).find(
+					(p) =>
+						p.kind === args.pane.kind && !p.pinned && p.id !== anchor.pane.id,
+				);
+				if (reusable) {
+					s.setPaneData({ paneId: reusable.id, data: args.pane.data });
+					s.setActivePane({ tabId: besideTab.id, paneId: reusable.id });
+					return;
+				}
+				s.splitPane({
+					tabId: besideTab.id,
+					paneId: anchor.pane.id,
+					position: "left",
+					newPane: args.pane,
+				});
+				return;
+			}
 			const activeTabId = s.activeTabId;
 			const tab = activeTabId ? s.tabs.find((t) => t.id === activeTabId) : null;
 
