@@ -92,6 +92,12 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // Must run before app.whenReady() so Chromium captures early renderer crashes.
 initCrashReporter();
 
+// Fork-local: render on the CPU, never the GPU. This machine runs large local
+// LLMs (Strata) that saturate GPU VRAM; under that pressure Chromium's GPU
+// process can't composite and the renderer stops painting (blank window, DOM
+// intact). Software compositing is immune to it. Must run before app.whenReady.
+app.disableHardwareAcceleration();
+
 // Linux: Ubuntu 22.04 (and derivatives like Linux Mint 21.x) ship libva 2.14
 // which Chromium's VAAPI wrapper rejects as too old, aborting the renderer
 // process (SIGTRAP / exitCode 133). Disabling VAAPI hw video accel sidesteps
